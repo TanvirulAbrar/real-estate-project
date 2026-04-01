@@ -2,9 +2,10 @@ import type { AuthOptions } from "next-auth";
 import GithubProvider from "next-auth/providers/github";
 import GoogleProvider from "next-auth/providers/google";
 import CredentialsProvider from "next-auth/providers/credentials";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { prisma } from "./prisma";
-import { compare } from "bcryptjs";
+import bcrypt from "bcryptjs";
+import { connectDB } from "./mongodb";
+import { User } from "./models";
+import { IUserLean } from "@/types";
 
 export const authOptions: AuthOptions = {
   providers: [
@@ -59,28 +60,32 @@ export const authOptions: AuthOptions = {
           }
         }
 
-        const user = await prisma.user.findUnique({
-          where: { email: credentials.email },
-        });
+        await connectDB();
 
-        if (!user || !user.password) {
+        const dbUser = await User.findOne({
+          email: credentials.email,
+          deleted_at: null,
+        }).select("+password");
+
+        if (!dbUser?.password) {
           return null;
         }
 
-        const isPasswordValid = await compare(
+        const isPasswordValid = await bcrypt.compare(
           credentials.password,
-          user.password,
+          dbUser.password,
         );
+
         if (!isPasswordValid) {
           return null;
         }
 
         return {
-          id: user.id,
-          email: user.email,
-          name: user.name,
-          role: user.role,
-          is_demo: user.is_demo,
+          id: dbUser._id.toString(),
+          email: dbUser.email,
+          name: dbUser.name,
+          role: dbUser.role as "client" | "agent" | "admin",
+          is_demo: dbUser.is_demo,
         };
       },
     }),
@@ -89,34 +94,43 @@ export const authOptions: AuthOptions = {
     async signIn({ user }) {
       if (!user?.email) return false;
 
-      await supabaseAdmin.from("users").upsert(
+      await connectDB();
+
+      await User.findOneAndUpdate(
+        { email: user.email },
         {
-          email: user.email,
-          name: user.name,
-          avatar_url: user.image,
+          $set: {
+            name: user.name ?? undefined,
+            avatar_url: typeof user.image === "string" ? user.image : undefined,
+          },
+          $setOnInsert: {
+            role: "client",
+            theme: "light",
+            is_demo: false,
+          },
         },
-        { onConflict: "email", ignoreDuplicates: false },
+        { upsert: true, new: true },
       );
+
       return true;
     },
     async session({ session }) {
       const email = session.user?.email;
       if (!email) return session;
 
-      const { data } = await supabaseAdmin
-        .from("users")
-        .select("id, role, theme, is_demo")
-        .eq("email", email)
-        .single();
+      await connectDB();
 
-      if (data) {
-        (session.user as any).id = data.id;
-
-        (session.user as any).role = data.role;
-
-        (session.user as any).theme = data.theme;
-
-        (session.user as any).is_demo = data.is_demo;
+      const dbUser = await User.findOne({
+        email,
+        deleted_at: null,
+      }).lean<IUserLean | null>();
+      if (dbUser) {
+        (session.user as { id?: string }).id = String(dbUser._id);
+        (session.user as { role?: string }).role = dbUser.role;
+        (session.user as { theme?: string }).theme = dbUser.theme;
+        (session.user as { is_demo?: boolean }).is_demo = Boolean(
+          dbUser.is_demo,
+        );
       }
       return session;
     },
@@ -124,6 +138,17 @@ export const authOptions: AuthOptions = {
       if (user?.email) token.email = user.email;
       return token;
     },
+    async redirect({ url, baseUrl }) {
+      if (url.startsWith("/")) return `${baseUrl}${url}`;
+      else if (new URL(url).origin === baseUrl) return url;
+
+      return baseUrl;
+    },
   },
   session: { strategy: "jwt" },
+  pages: {
+    signIn: "/login",
+    error: "/login",
+  },
+  secret: process.env.NEXTAUTH_SECRET || "dev-secret-key-change-in-production",
 };

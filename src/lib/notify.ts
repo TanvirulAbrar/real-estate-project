@@ -1,4 +1,5 @@
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { Notification } from "@/lib/models";
 
 export type NotificationType =
   | "inquiry_received"
@@ -17,16 +18,15 @@ export async function triggerNotification(params: {
   body: string;
   relatedId?: string;
 }): Promise<void> {
-  prisma.notification
-    .create({
-      data: {
+  connectDB()
+    .then(() =>
+      Notification.create({
         user_id: params.userId,
         type: params.type,
         title: params.title,
         body: params.body,
-        related_id: params.relatedId ?? null,
-      },
-    })
+        related_id: params.relatedId,
+      }),
+    )
     .catch((err) => console.error("[notify] failed:", err));
 }
-
