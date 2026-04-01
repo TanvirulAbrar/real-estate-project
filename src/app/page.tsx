@@ -5,13 +5,16 @@ import {
   MdRoomService,
   MdArchitecture,
   MdGavel,
+  MdRealEstateAgent,
 } from "react-icons/md";
+import { FaBuilding, FaHome, FaCity, FaRegBuilding } from "react-icons/fa";
 import { getFeaturedProperties } from "@/lib/actions";
 import ContactForm from "@/components/ContactForm";
 import Link from "next/link";
+import PropertiesSelectionSection from "@/components/PropertiesSelectionSection";
 
 export default async function Home() {
-  const featuredProperties = await getFeaturedProperties(3);
+  const featuredProperties = await getFeaturedProperties(8);
   return (
     <div className="min-h-screen bg-[#003366] text-[#e1e2e9] font-inter">
       <section className="relative min-h-screen flex flex-col justify-between overflow-hidden">
@@ -36,7 +39,7 @@ export default async function Home() {
               letterSpacing: "-0.02em",
               lineHeight: "0.9",
             }}
-            className="font-inter font-inter text-7xl md:text-[10rem] leading-[0.85] tracking-tighter text-white opacity-95"
+            className="font-inter pt-10 font-inter text-7xl md:text-[10rem] leading-[0.85] tracking-tighter text-white opacity-95"
           >
             PURE
             <br />
@@ -58,170 +61,67 @@ export default async function Home() {
 
       <section className="px-8 -mt-12 relative z-20">
         <div
-          className="max-w-5xl mx-auto glass rounded-xl p-3 flex flex-col md:flex-row gap-2 border border-[#424751]/10"
+          className="max-w-5xl mx-auto glass max-[760px]:rounded-4xl rounded-full p-3 flex flex-col md:flex-row gap-2 border border-[#424751]/10 
+             focus-within:ring-2 focus-within:ring-[#a9c7ff] 
+             hover:ring-2 hover:ring-[#a9c7ff]"
           style={{
             background: "rgba(4, 31, 65, 0.4)",
             backdropFilter: "blur(20px)",
           }}
+          tabIndex={-1}
         >
-          <div className="flex-1 flex items-center px-4 gap-3 bg-[#001b3d] rounded-lg h-16">
+          <div className="flex-1 flex items-center px-4 gap-3 bg-[#001b3d] rounded-full h-16 transition-all">
             <MdSearch className="w-6 h-6 text-[#a9c7ff]" />
             <input
-              className="bg-transparent border-none focus:ring-0 w-full text-lg placeholder:text-[#8c919d]"
+              className="bg-transparent border-none focus:ring-0 w-full text-lg placeholder:text-[#8c919d] outline-none rounded-full"
               placeholder="Search by Architect, Style or Global City..."
               type="text"
             />
           </div>
-          <button className="bg-white text-[#003366] px-8 py-3 font-bold text-[10px] uppercase tracking-[0.2em] rounded-full hover:bg-opacity-90 transition-all">
+
+          <button
+            className="bg-white text-[#003366] px-8 py-3 font-bold text-[10px] uppercase tracking-[0.2em] rounded-full 
+               hover:bg-opacity-90 active:scale-95 transition-all"
+            type="button"
+          >
             Discover
           </button>
         </div>
       </section>
 
-      <section className="px-8 py-32 max-w-7xl mx-auto">
-        <div className="flex flex-col md:flex-row justify-between items-baseline mb-16 gap-4">
-          <h2 className="font-inter font-inter text-5xl tracking-tighter">
-            THE SELECTION
-          </h2>
-          <p className="text-[#c2c6d3] uppercase tracking-[0.2em] text-xs font-semibold">
-            Volume 04 / 2024
-          </p>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-          {featuredProperties.map((property) => (
-            <div
-              key={property.id}
-              className="glass rounded-xl overflow-hidden border border-[#424751]/10 group"
-              style={{
-                background: "rgba(4, 31, 65, 0.4)",
-                backdropFilter: "blur(20px)",
-              }}
-            >
-              <div
-                className="aspect-[4/5] bg-cover bg-center group-hover:scale-105 transition-transform duration-700"
-                style={{
-                  backgroundImage: property.image_url
-                    ? `url('${property.image_url}')`
-                    : "url('https://lh3.googleusercontent.com/aida-public/AB6AXuAuEmaHUHPEOIz1SAAC-UVwBnvaIsfKoVItGTJ-5QLuYHVF8WNQmyOEZOTMh_4N_RAjXpwf56a89s5I0WwrCuD80cVXL4Pt3voNGqEOC6sxJcXR5Gr-LtBzLlHpHBvTlKQvvQLM8G4Z1iCOHY6Vd3STZRqLbz57uuSD_cnpY7NbtobjVPDClKeSNB2oTBeF_vkBektBOJWpvwberxzsoxvZM8dQZXgsqpV-e77kCPkSqOPBBebXgVVEv3-yDulaXFLZYyvW6AT2hFj4')",
-                }}
-              ></div>
-              <div className="p-8">
-                <span className="text-[#a9c7ff] text-[10px] font-bold tracking-[0.3em] uppercase mb-2 block">
-                  {property.city}, {property.state}
-                </span>
-                <h3 className="font-inter text-2xl font-bold mb-4">
-                  {property.title}
-                </h3>
-                <div className="flex justify-between items-center border-t border-[#424751]/10 pt-4">
-                  <span className="text-[#c2c6d3] text-sm">
-                    {property.bedrooms || 0} Beds •{" "}
-                    {property.area_sqft
-                      ? `${Number(property.area_sqft).toLocaleString()} sqft`
-                      : "Contact for details"}
-                  </span>
-                  <span className="font-bold text-[#a9c7ff]">
-                    ${Number(property.price).toLocaleString()}M
-                  </span>
-                </div>
-              </div>
+      <section className="py-12 ">
+        <div className="max-w-7xl mx-auto px-4">
+          <div className="flex flex-wrap justify-center items-center gap-8 md:gap-16 opacity-60 grayscale hover:grayscale-0 transition-all duration-500">
+            <div className="flex items-center gap-2">
+              <FaBuilding className="text-3xl" />
+              <span className="text-xl font-bold font-display">Zillow</span>
             </div>
-          ))}
 
-          {featuredProperties.length === 0 && (
-            <>
-              <div
-                className="glass rounded-xl overflow-hidden border border-[#424751]/10 group"
-                style={{
-                  background: "rgba(4, 31, 65, 0.4)",
-                  backdropFilter: "blur(20px)",
-                }}
-              >
-                <div
-                  className="aspect-[4/5] bg-cover bg-center group-hover:scale-105 transition-transform duration-700"
-                  style={{
-                    backgroundImage:
-                      "url('https://lh3.googleusercontent.com/aida-public/AB6AXuAuEmaHUHPEOIz1SAAC-UVwBnvaIsfKoVItGTJ-5QLuYHVF8WNQmyOEZOTMh_4N_RAjXpwf56a89s5I0WwrCuD80cVXL4Pt3voNGqEOC6sxJcXR5Gr-LtBzLlHpHBvTlKQvvQLM8G4Z1iCOHY6Vd3STZRqLbz57uuSD_cnpY7NbtobjVPDClKeSNB2oTBeF_vkBektBOJWpvwberxzsoxvZM8dQZXgsqpV-e77kCPkSqOPBBebXgVVEv3-yDulaXFLZYyvW6AT2hFj4')",
-                  }}
-                ></div>
-                <div className="p-8">
-                  <span className="text-[#a9c7ff] text-[10px] font-bold tracking-[0.3em] uppercase mb-2 block">
-                    Amalfi, Italy
-                  </span>
-                  <h3 className="font-inter text-2xl font-bold mb-4">
-                    The Azure Pavilion
-                  </h3>
-                  <div className="flex justify-between items-center border-t border-[#424751]/10 pt-4">
-                    <span className="text-[#c2c6d3] text-sm">
-                      4 Beds • 5,200 sqft
-                    </span>
-                    <span className="font-bold text-[#a9c7ff]">$12.4M</span>
-                  </div>
-                </div>
-              </div>
+            <div className="flex items-center gap-2">
+              <FaHome className="text-3xl" />
+              <span className="text-xl font-bold font-display">Realtor</span>
+            </div>
 
-              <div
-                className="glass rounded-xl overflow-hidden border border-[#424751]/10 group"
-                style={{
-                  background: "rgba(4, 31, 65, 0.4)",
-                  backdropFilter: "blur(20px)",
-                }}
-              >
-                <div
-                  className="aspect-[4/5] bg-cover bg-center group-hover:scale-105 transition-transform duration-700"
-                  style={{
-                    backgroundImage:
-                      "url('https://lh3.googleusercontent.com/aida-public/AB6AXuBv7bVX0N_6chqZmBl6uPS8j3Td69Yf-xBS-UwZcS7bi1gkpVUlaDSoFkWyR_jAwogOCN3RHw4D0ure-QhWs9tozI0Bl_PQkut7WKFjqVTR924XU7qo6NEI2Wh9bbhBuJJ5Gz5j_VsgzJXMGMS8TJn25nWbSyutSLQg5KSyZeJhjxZ8jPznDwBoPrvoNsJ7rQYnO-j5jD2e1AJjTzb9zE5jvRxrCf-7uKmFKTpXeUpM-pg0CJsH_rTr-6nQBxk7Lo44W5PFG5vivN0h')",
-                  }}
-                ></div>
-                <div className="p-8">
-                  <span className="text-[#a9c7ff] text-[10px] font-bold tracking-[0.3em] uppercase mb-2 block">
-                    Kyoto, Japan
-                  </span>
-                  <h3 className="font-inter text-2xl font-bold mb-4">
-                    Monolith House
-                  </h3>
-                  <div className="flex justify-between items-center border-t border-[#424751]/10 pt-4">
-                    <span className="text-[#c2c6d3] text-sm">
-                      3 Beds • 3,800 sqft
-                    </span>
-                    <span className="font-bold text-[#a9c7ff]">$8.9M</span>
-                  </div>
-                </div>
-              </div>
+            <div className="flex items-center gap-2">
+              <MdRealEstateAgent className="text-3xl" />
+              <span className="text-xl font-bold font-display">Redfin</span>
+            </div>
 
-              <div
-                className="glass rounded-xl overflow-hidden border border-[#424751]/10 group"
-                style={{
-                  background: "rgba(4, 31, 65, 0.4)",
-                  backdropFilter: "blur(20px)",
-                }}
-              >
-                <div
-                  className="aspect-[4/5] bg-cover bg-center group-hover:scale-105 transition-transform duration-700"
-                  style={{
-                    backgroundImage:
-                      "url('https://lh3.googleusercontent.com/aida-public/AB6AXuBbNyrK2Xh-SXQ6iM0vBwGx4L3Nw2J1_dWbtaDtn-6AVbusZCEj5E13Kwst5mSaB6Z5FiSXwVKtnJAYdd5R4vLd1_RcVJOPAyXuMxbfWHxnwqZ0OynFZzO9gyzgxr4Pq3Rvc56Rl1IbmfVg1cUHscWV4DODqhY41PoaQxNFRYkkIdpZGHzUAiiuhQL2qq46m8f5D_3UQzJ33PyF_eGWCQWNr5oPbUJG7Ln6KBNxmjosFUMmTqNJcdJw0e0WhT7eyjrOMEbWKKP9BlHA')",
-                  }}
-                ></div>
-                <div className="p-8">
-                  <span className="text-[#a9c7ff] text-[10px] font-bold tracking-[0.3em] uppercase mb-2 block">
-                    Geneva, CH
-                  </span>
-                  <h3 className="font-inter text-2xl font-bold mb-4">
-                    The Glass Gallery
-                  </h3>
-                  <div className="flex justify-between items-center border-t border-[#424751]/10 pt-4">
-                    <span className="text-[#c2c6d3] text-sm">
-                      5 Beds • 6,100 sqft
-                    </span>
-                    <span className="font-bold text-[#a9c7ff]">$15.2M</span>
-                  </div>
-                </div>
-              </div>
-            </>
-          )}
+            <div className="flex items-center gap-2">
+              <FaCity className="text-3xl" />
+              <span className="text-xl font-bold font-display">Century 21</span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <FaRegBuilding className="text-3xl" />
+              <span className="text-xl font-bold font-display">
+                Coldwell Banker
+              </span>
+            </div>
+          </div>
         </div>
       </section>
+      <PropertiesSelectionSection featuredProperties={featuredProperties} />
 
       <section className="bg-[#001b3d] py-32 px-8">
         <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-24 items-center">
@@ -280,15 +180,15 @@ export default async function Home() {
       </section>
 
       <section className="py-24 px-8 max-w-7xl mx-auto">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid text-5xl text-center max-sm:text-4xl grid-cols-2 md:grid-cols-4 gap-4">
           <div
-            className="glass p-12 rounded-xl text-center border border-[#424751]/10"
+            className="glass p-12 max-sm:p-3 content-center rounded-xl text-center border border-[#424751]/10"
             style={{
               background: "rgba(4, 31, 65, 0.4)",
               backdropFilter: "blur(20px)",
             }}
           >
-            <div className="font-inter font-inter text-5xl text-[#a9c7ff] mb-2">
+            <div className="font-inter font-inter  text-[#a9c7ff] mb-2">
               124
             </div>
             <div className="text-[10px] font-bold tracking-[0.3em] uppercase opacity-60">
@@ -296,13 +196,13 @@ export default async function Home() {
             </div>
           </div>
           <div
-            className="glass p-12 rounded-xl text-center border border-[#424751]/10"
+            className="glass p-12 max-sm:p-3 content-center items-center rounded-xl text-center border border-[#424751]/10"
             style={{
               background: "rgba(4, 31, 65, 0.4)",
               backdropFilter: "blur(20px)",
             }}
           >
-            <div className="font-inter font-inter text-5xl text-[#a9c7ff] mb-2">
+            <div className="font-inter font-inter  text-[#a9c7ff] mb-2">
               $4.2B
             </div>
             <div className="text-[10px] font-bold tracking-[0.3em] uppercase opacity-60">
@@ -310,29 +210,25 @@ export default async function Home() {
             </div>
           </div>
           <div
-            className="glass p-12 rounded-xl text-center border border-[#424751]/10"
+            className="glass p-12 max-sm:p-3 content-center rounded-xl text-center border border-[#424751]/10"
             style={{
               background: "rgba(4, 31, 65, 0.4)",
               backdropFilter: "blur(20px)",
             }}
           >
-            <div className="font-inter font-inter text-5xl text-[#a9c7ff] mb-2">
-              18
-            </div>
+            <div className="font-inter font-inter text-[#a9c7ff] mb-2">18</div>
             <div className="text-[10px] font-bold tracking-[0.3em] uppercase opacity-60">
               Iconic Partners
             </div>
           </div>
           <div
-            className="glass p-12 rounded-xl text-center border border-[#424751]/10"
+            className="glass p-12 max-sm:p-3 content-center rounded-xl text-center border border-[#424751]/10"
             style={{
               background: "rgba(4, 31, 65, 0.4)",
               backdropFilter: "blur(20px)",
             }}
           >
-            <div className="font-inter font-inter text-5xl text-[#a9c7ff] mb-2">
-              0%
-            </div>
+            <div className="font-inter font-inter  text-[#a9c7ff] mb-2">0%</div>
             <div className="text-[10px] font-bold tracking-[0.3em] uppercase opacity-60">
               Compromise
             </div>
