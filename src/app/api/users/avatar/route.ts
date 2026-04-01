@@ -1,8 +1,10 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { User } from "@/lib/models";
 import { requireSession } from "@/lib/auth";
-import { ok, badRequest, serverError } from "@/lib/response";
+import { ok, serverError } from "@/lib/response";
 import { parseBody } from "@/lib/validator";
+import { IUserLean } from "@/types";
 
 const avatarSchema = z.object({
   avatar_url: z.string().url().max(500),
@@ -10,23 +12,29 @@ const avatarSchema = z.object({
 
 export async function POST(req: Request) {
   try {
+    await connectDB();
     const session = await requireSession(req);
 
     const body = await parseBody(req, avatarSchema);
     if (body instanceof Response) return body;
 
-    const updated = await prisma.user.update({
-      where: { id: session.user.id },
-      data: { avatar_url: body.avatar_url },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        avatar_url: true,
+    const updated = await User.findByIdAndUpdate(
+      session.user.id,
+      { avatar_url: body.avatar_url },
+      { new: true, select: "email name avatar_url" },
+    ).lean<IUserLean | null>();
+
+    if (!updated) return serverError();
+
+    return ok({
+      message: "Avatar updated",
+      user: {
+        id: String(updated._id),
+        email: updated.email,
+        name: updated.name,
+        avatar_url: updated.avatar_url,
       },
     });
-
-    return ok({ message: "Avatar updated", user: updated });
   } catch (err) {
     console.error("[users/avatar] POST", err);
     return serverError();
@@ -35,20 +43,26 @@ export async function POST(req: Request) {
 
 export async function DELETE(req: Request) {
   try {
+    await connectDB();
     const session = await requireSession(req);
 
-    const updated = await prisma.user.update({
-      where: { id: session.user.id },
-      data: { avatar_url: null },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        avatar_url: true,
+    const updated = await User.findByIdAndUpdate(
+      session.user.id,
+      { avatar_url: null },
+      { new: true, select: "email name avatar_url" },
+    ).lean<IUserLean | null>();
+
+    if (!updated) return serverError();
+
+    return ok({
+      message: "Avatar removed",
+      user: {
+        id: String(updated._id),
+        email: updated.email,
+        name: updated.name,
+        avatar_url: updated.avatar_url,
       },
     });
-
-    return ok({ message: "Avatar removed", user: updated });
   } catch (err) {
     console.error("[users/avatar] DELETE", err);
     return serverError();

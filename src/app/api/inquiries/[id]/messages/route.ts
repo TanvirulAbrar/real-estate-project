@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { Inquiry, InquiryMessage, User } from "@/lib/models";
 import { requireSession } from "@/lib/auth";
 import {
   ok,
@@ -9,8 +10,9 @@ import {
   notFound,
 } from "@/lib/response";
 import { parseQuery } from "@/lib/validator";
+import { IInquiryLean, IInquiryMessageLean, IUserLean } from "@/types";
 
-const idSchema = z.string().uuid();
+const idSchema = z.string().min(1);
 const querySchema = z.object({
   page: z.coerce.number().int().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
@@ -38,6 +40,7 @@ export async function GET(
   context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const session = await requireSession(req);
     const { id } = await context.params;
     const parsedId = idSchema.safeParse(id);
@@ -50,10 +53,12 @@ export async function GET(
     const page = query.page ?? 1;
     const limit = query.limit ?? 50;
 
-    const inquiry = await prisma.inquiry.findUnique({
-      where: { id: parsedId.data, deleted_at: null },
-      select: { id: true, client_id: true, agent_id: true },
-    });
+    const inquiry = await Inquiry.findOne({
+      _id: parsedId.data,
+      deleted_at: null,
+    })
+      .select("client_id agent_id")
+      .lean<IInquiryLean | null>();
 
     if (!inquiry) return notFound("Inquiry not found");
 
@@ -64,24 +69,40 @@ export async function GET(
       return forbidden("Forbidden");
     }
 
+    const iid = String(inquiry._id);
+
     const [total, messages] = await Promise.all([
-      prisma.inquiryMessage.count({
-        where: { inquiry_id: inquiry.id },
-      }),
-      prisma.inquiryMessage.findMany({
-        where: { inquiry_id: inquiry.id },
-        orderBy: { created_at: "asc" },
-        skip: (page - 1) * limit,
-        take: limit,
-        include: {
-          sender: {
-            select: { id: true, name: true, role: true, avatar_url: true },
-          },
-        },
-      }),
+      InquiryMessage.countDocuments({ inquiry_id: iid }),
+      InquiryMessage.find({ inquiry_id: iid })
+        .sort({ created_at: 1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean<IInquiryMessageLean[]>(),
     ]);
 
-    return ok(computePagination(total, page, limit, messages));
+    const senderIds = [...new Set(messages.map((m) => m.sender_id))];
+    const senders = await User.find({ _id: { $in: senderIds } })
+      .select("name role avatar_url")
+      .lean<IUserLean[]>();
+    const senderMap = new Map(senders.map((s) => [String(s._id), s]));
+
+    const data = messages.map((m) => {
+      const s = senderMap.get(m.sender_id);
+      return {
+        ...m,
+        id: String(m._id),
+        sender: s
+          ? {
+              id: m.sender_id,
+              name: s.name,
+              role: s.role,
+              avatar_url: s.avatar_url,
+            }
+          : null,
+      };
+    });
+
+    return ok(computePagination(total, page, limit, data));
   } catch (err) {
     console.error("[inquiries/[id]/messages] GET", err);
     return serverError();

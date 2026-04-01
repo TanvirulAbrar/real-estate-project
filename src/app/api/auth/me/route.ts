@@ -1,20 +1,21 @@
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { User } from "@/lib/models";
 import { requireSession, HttpError } from "@/lib/auth";
 import { ok, serverError } from "@/lib/response";
+import { IUserLean } from "@/types";
 
 export async function GET(req: Request) {
   try {
+    await connectDB();
     const session = await requireSession(req);
-    const user = await prisma.user.findUnique({
-      where: { id: session.user.id },
-    });
+    const user = await User.findById(session.user.id).lean<IUserLean | null>();
 
     if (!user || user.deleted_at) {
       throw new HttpError(404, "User not found");
     }
 
     return ok({
-      id: user.id,
+      id: String(user._id),
       email: user.email,
       name: user.name,
       phone: user.phone,
@@ -35,4 +36,3 @@ export async function GET(req: Request) {
     return serverError();
   }
 }
-

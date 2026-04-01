@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { Offer, Property, TransactionModel } from "@/lib/models";
 import { requireRole } from "@/lib/auth";
 import {
   ok,
@@ -8,31 +9,38 @@ import {
   serverError,
   notFound,
 } from "@/lib/response";
+import { IOfferLean, IPropertyLean } from "@/types";
 import { triggerNotification } from "@/lib/notify";
 
-const idSchema = z.string().uuid();
+const idSchema = z.string().min(1);
 
 export async function POST(
   req: Request,
   context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const session = await requireRole(req, ["agent", "admin"]);
     const { id } = await context.params;
     const parsedId = idSchema.safeParse(id);
     if (!parsedId.success) return badRequest("Invalid id");
 
-    const offer = await prisma.offer.findUnique({
-      where: { id: parsedId.data, deleted_at: null } as any,
-      include: {
-        property: { select: { id: true, agent_id: true, title: true } },
-      },
-    });
+    const offer = await Offer.findOne({
+      _id: parsedId.data,
+      deleted_at: null,
+    }).lean<IOfferLean | null>();
 
     if (!offer) return notFound("Offer not found");
+
+    const property = await Property.findById(offer.property_id)
+      .select("agent_id title")
+      .lean<IPropertyLean | null>();
+
+    if (!property) return notFound("Property not found");
+
     if (
       session.user.role !== "admin" &&
-      offer.property.agent_id !== session.user.id
+      property.agent_id !== session.user.id
     ) {
       return forbidden("Forbidden");
     }
@@ -40,34 +48,32 @@ export async function POST(
       return badRequest("Only pending offers can be accepted");
     }
 
-    const updated = await prisma.offer.update({
-      where: { id: parsedId.data },
-      data: { status: "accepted" },
+    const updated = await Offer.findByIdAndUpdate(
+      parsedId.data,
+      { status: "accepted" },
+      { new: true },
+    ).lean<IOfferLean | null>();
+
+    await TransactionModel.create({
+      property_id: offer.property_id,
+      buyer_id: offer.buyer_id,
+      agent_id: property.agent_id,
+      offer_id: String(offer._id),
+      sale_price: Number(offer.amount),
+      commission_rate: 0.03,
+      status: "pending",
     });
 
-    await prisma.transaction.create({
-      data: {
-        property_id: offer.property_id,
-        buyer_id: offer.buyer_id,
-        agent_id: offer.property.agent_id,
-        offer_id: offer.id,
-        sale_price: offer.amount,
-        commission_rate: 0.03,
-        status: "pending",
-      },
-    });
-
-    await prisma.property.update({
-      where: { id: offer.property_id },
-      data: { status: "pending" },
+    await Property.findByIdAndUpdate(offer.property_id, {
+      status: "pending",
     });
 
     await triggerNotification({
       userId: offer.buyer_id,
       type: "offer_accepted",
       title: "Offer accepted!",
-      body: `Your offer for ${offer.property.title} has been accepted.`,
-      relatedId: updated.id,
+      body: `Your offer for ${property.title} has been accepted.`,
+      relatedId: String(updated!._id),
     });
 
     return ok({ message: "Offer accepted", offer: updated });

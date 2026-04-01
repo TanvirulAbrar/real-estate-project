@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { Review } from "@/lib/models";
 import { requireSession } from "@/lib/auth";
 import {
   ok,
@@ -9,8 +10,9 @@ import {
   notFound,
 } from "@/lib/response";
 import { parseBody } from "@/lib/validator";
+import { IReviewLean } from "@/types";
 
-const idSchema = z.string().uuid();
+const idSchema = z.string().min(1);
 
 const putSchema = z.object({
   rating: z.coerce.number().int().min(1).max(5).optional(),
@@ -22,19 +24,18 @@ export async function GET(
   context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const { id } = await context.params;
     const parsedId = idSchema.safeParse(id);
     if (!parsedId.success) return badRequest("Invalid id");
 
-    const review = await prisma.review.findUnique({
-      where: { id: parsedId.data },
-    });
+    const review = await Review.findById(parsedId.data).lean<IReviewLean | null>();
 
     if (!review) {
       return notFound("Review not found");
     }
 
-    return ok(review);
+    return ok({ ...review, id: String(review._id) });
   } catch (err) {
     console.error("[reviews/[id]] GET", err);
     return serverError();
@@ -46,15 +47,15 @@ export async function PUT(
   context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const session = await requireSession(req);
     const { id } = await context.params;
     const parsedId = idSchema.safeParse(id);
     if (!parsedId.success) return badRequest("Invalid id");
 
-    const review = await prisma.review.findUnique({
-      where: { id: parsedId.data },
-      select: { id: true, author_id: true },
-    });
+    const review = await Review.findById(parsedId.data)
+      .select("author_id")
+      .lean<IReviewLean | null>();
 
     if (!review) return notFound("Review not found");
 
@@ -65,15 +66,16 @@ export async function PUT(
     const body = await parseBody(req, putSchema);
     if (body instanceof Response) return body;
 
-    const updated = await prisma.review.update({
-      where: { id: parsedId.data },
-      data: {
+    const updated = await Review.findByIdAndUpdate(
+      parsedId.data,
+      {
         ...(body.rating !== undefined ? { rating: body.rating } : {}),
         ...(body.comment !== undefined ? { comment: body.comment } : {}),
       },
-    });
+      { new: true },
+    ).lean<IReviewLean | null>();
 
-    return ok(updated);
+    return ok({ ...updated!, id: String(updated!._id) });
   } catch (err) {
     console.error("[reviews/[id]] PUT", err);
     return serverError();
@@ -85,15 +87,15 @@ export async function DELETE(
   context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const session = await requireSession(req);
     const { id } = await context.params;
     const parsedId = idSchema.safeParse(id);
     if (!parsedId.success) return badRequest("Invalid id");
 
-    const review = await prisma.review.findUnique({
-      where: { id: parsedId.data },
-      select: { id: true, author_id: true },
-    });
+    const review = await Review.findById(parsedId.data)
+      .select("author_id")
+      .lean<IReviewLean | null>();
 
     if (!review) return notFound("Review not found");
 
@@ -101,7 +103,7 @@ export async function DELETE(
       return forbidden("Forbidden");
     }
 
-    await prisma.review.delete({ where: { id: parsedId.data } });
+    await Review.findByIdAndDelete(parsedId.data);
     return ok({ message: "Review deleted" });
   } catch (err) {
     console.error("[reviews/[id]] DELETE", err);

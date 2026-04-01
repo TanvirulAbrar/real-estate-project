@@ -6,7 +6,6 @@ const schema = z.object({
   role: z.enum(["client", "agent", "admin"]),
 });
 
-// Demo user credentials
 const demoUsers = {
   client: {
     email: "user@example.com",

@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { Offer, Property } from "@/lib/models";
 import { requireRole } from "@/lib/auth";
 import {
   ok,
@@ -8,31 +9,38 @@ import {
   serverError,
   notFound,
 } from "@/lib/response";
+import { IOfferLean, IPropertyLean } from "@/types";
 import { triggerNotification } from "@/lib/notify";
 
-const idSchema = z.string().uuid();
+const idSchema = z.string().min(1);
 
 export async function POST(
   req: Request,
   context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const session = await requireRole(req, ["agent", "admin"]);
     const { id } = await context.params;
     const parsedId = idSchema.safeParse(id);
     if (!parsedId.success) return badRequest("Invalid id");
 
-    const offer = await prisma.offer.findUnique({
-      where: { id: parsedId.data, deleted_at: null } as any,
-      include: {
-        property: { select: { id: true, agent_id: true, title: true } },
-      },
-    });
+    const offer = await Offer.findOne({
+      _id: parsedId.data,
+      deleted_at: null,
+    }).lean<IOfferLean | null>();
 
     if (!offer) return notFound("Offer not found");
+
+    const property = await Property.findById(offer.property_id)
+      .select("agent_id title")
+      .lean<IPropertyLean | null>();
+
+    if (!property) return notFound("Property not found");
+
     if (
       session.user.role !== "admin" &&
-      offer.property.agent_id !== session.user.id
+      property.agent_id !== session.user.id
     ) {
       return forbidden("Forbidden");
     }
@@ -40,17 +48,18 @@ export async function POST(
       return badRequest("Only pending offers can be rejected");
     }
 
-    const updated = await prisma.offer.update({
-      where: { id: parsedId.data },
-      data: { status: "rejected" },
-    });
+    const updated = await Offer.findByIdAndUpdate(
+      parsedId.data,
+      { status: "rejected" },
+      { new: true },
+    ).lean<IOfferLean | null>();
 
     await triggerNotification({
       userId: offer.buyer_id,
       type: "offer_rejected",
       title: "Offer rejected",
-      body: `Your offer for ${offer.property.title} has been rejected.`,
-      relatedId: updated.id,
+      body: `Your offer for ${property.title} has been rejected.`,
+      relatedId: String(updated!._id),
     });
 
     return ok({ message: "Offer rejected", offer: updated });

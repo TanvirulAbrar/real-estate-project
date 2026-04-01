@@ -1,9 +1,10 @@
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { connectDB } from "@/lib/mongodb";
+import { User } from "@/lib/models";
+import { IUserLean } from "@/types";
 
 export async function POST(request: Request) {
   try {
-    console.log("URL:", process.env.NEXT_PUBLIC_SUPABASE_URL);
-    console.log("Key exists:", !!process.env.SUPABASE_SERVICE_ROLE_KEY);
+    await connectDB();
     const { id, name, email } = await request.json();
 
     if (!id || !name || !email) {
@@ -13,17 +14,23 @@ export async function POST(request: Request) {
       );
     }
 
-    const { data, error } = await supabaseAdmin
-      .from("users")
-      .insert([{ id, name, email }])
-      .select();
+    const doc = await User.findOneAndUpdate(
+      { email },
+      {
+        $set: { name, email },
+        $setOnInsert: { _id: id, role: "client", theme: "light" },
+      },
+      { upsert: true, new: true, runValidators: true },
+    ).lean<IUserLean | null>();
 
-    if (error) {
-      console.error("Admin insert error:", error);
-      return Response.json({ message: error.message }, { status: 500 });
-    }
-
-    return Response.json(data[0], { status: 200 });
+    return Response.json(
+      {
+        id: String(doc!._id),
+        name: doc!.name,
+        email: doc!.email,
+      },
+      { status: 200 },
+    );
   } catch (err) {
     console.error("Server error:", err);
     return Response.json({ message: "Server error" }, { status: 500 });

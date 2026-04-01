@@ -1,8 +1,17 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import {
+  User,
+  Property,
+  TransactionModel,
+  Offer,
+  Inquiry,
+  Appointment,
+} from "@/lib/models";
 import { requireRole } from "@/lib/auth";
 import { ok, serverError } from "@/lib/response";
 import { parseQuery } from "@/lib/validator";
+import { IUserLean, IPropertyLean, ITransactionLean, IOfferLean, IInquiryLean, IAppointmentLean } from "@/types";
 
 const querySchema = z.object({
   months: z.coerce.number().int().min(1).max(24).optional(),
@@ -10,7 +19,8 @@ const querySchema = z.object({
 
 export async function GET(req: Request) {
   try {
-    const session = await requireRole(req, ["admin"]);
+    await connectDB();
+    await requireRole(req, ["admin"]);
 
     const url = new URL(req.url);
     const query = parseQuery(url.searchParams, querySchema);
@@ -24,107 +34,148 @@ export async function GET(req: Request) {
       totalUsers,
       totalProperties,
       totalSales,
-      totalRevenue,
+      revenueAgg,
       activeListings,
       pendingOffers,
       totalInquiries,
       totalAppointments,
     ] = await Promise.all([
-      prisma.user.count({ where: { deleted_at: null } }),
-      prisma.property.count({ where: { deleted_at: null } }),
-      prisma.transaction.count({ where: { status: "closed" } }),
-      prisma.transaction.aggregate({
-        where: { status: "closed" },
-        _sum: { sale_price: true },
-      }),
-      prisma.property.count({ where: { deleted_at: null, status: "active" } }),
-      prisma.offer.count({ where: { deleted_at: null, status: "pending" } }),
-      prisma.inquiry.count({ where: { deleted_at: null } }),
-      prisma.appointment.count({ where: { deleted_at: null } }),
+      User.countDocuments({ deleted_at: null }),
+      Property.countDocuments({ deleted_at: null }),
+      TransactionModel.countDocuments({ status: "closed" }),
+      TransactionModel.aggregate([
+        { $match: { status: "closed" } },
+        { $group: { _id: null, total: { $sum: "$sale_price" } } },
+      ]),
+      Property.countDocuments({ deleted_at: null, status: "active" }),
+      Offer.countDocuments({ deleted_at: null, status: "pending" }),
+      Inquiry.countDocuments({ deleted_at: null }),
+      Appointment.countDocuments({ deleted_at: null }),
     ]);
 
-    const monthlyStats = await prisma.$queryRaw`
-      SELECT 
-        DATE_TRUNC('month', created_at) as month,
-        COUNT(*)::int as properties_count,
-        COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0)::int as active_properties
-      FROM properties 
-      WHERE deleted_at IS NULL 
-        AND created_at >= ${startDate}
-      GROUP BY DATE_TRUNC('month', created_at)
-      ORDER BY month DESC
-    `;
+    const totalRevenue =
+      revenueAgg[0]?.total != null ? Number(revenueAgg[0].total) : 0;
 
-    const monthlySales = await prisma.$queryRaw`
-      SELECT 
-        DATE_TRUNC('month', created_at) as month,
-        COUNT(*)::int as sales_count,
-        COALESCE(SUM(sale_price), 0) as revenue
-      FROM transactions 
-      WHERE status = 'closed' 
-        AND created_at >= ${startDate}
-      GROUP BY DATE_TRUNC('month', created_at)
-      ORDER BY month DESC
-    `;
-
-    const monthlyUsers = await prisma.$queryRaw`
-      SELECT 
-        DATE_TRUNC('month', created_at) as month,
-        COUNT(*)::int as users_count,
-        COALESCE(SUM(CASE WHEN role = 'agent' THEN 1 ELSE 0 END), 0)::int as agents_count
-      FROM users 
-      WHERE deleted_at IS NULL 
-        AND created_at >= ${startDate}
-      GROUP BY DATE_TRUNC('month', created_at)
-      ORDER BY month DESC
-    `;
-
-    const topAgents = await prisma.user.findMany({
-      where: { role: "agent", deleted_at: null },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        _count: {
-          select: {
-            properties: { where: { deleted_at: null } },
-            transactions: { where: { status: "closed" } },
+    const [monthlyStats, monthlySales, monthlyUsers] = await Promise.all([
+      Property.aggregate([
+        {
+          $match: {
+            deleted_at: null,
+            created_at: { $gte: startDate },
           },
         },
-      },
-      orderBy: {
-        transactions: {
-          _count: "desc",
+        {
+          $group: {
+            _id: {
+              y: { $year: "$created_at" },
+              m: { $month: "$created_at" },
+            },
+            properties_count: { $sum: 1 },
+            active_properties: {
+              $sum: { $cond: [{ $eq: ["$status", "active"] }, 1, 0] },
+            },
+          },
         },
-      },
-      take: 10,
-    });
+        { $sort: { "_id.y": -1, "_id.m": -1 } },
+      ]),
+      TransactionModel.aggregate([
+        {
+          $match: {
+            status: "closed",
+            created_at: { $gte: startDate },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              y: { $year: "$created_at" },
+              m: { $month: "$created_at" },
+            },
+            sales_count: { $sum: 1 },
+            revenue: { $sum: "$sale_price" },
+          },
+        },
+        { $sort: { "_id.y": -1, "_id.m": -1 } },
+      ]),
+      User.aggregate([
+        {
+          $match: {
+            deleted_at: null,
+            created_at: { $gte: startDate },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              y: { $year: "$created_at" },
+              m: { $month: "$created_at" },
+            },
+            users_count: { $sum: 1 },
+            agents_count: {
+              $sum: { $cond: [{ $eq: ["$role", "agent"] }, 1, 0] },
+            },
+          },
+        },
+        { $sort: { "_id.y": -1, "_id.m": -1 } },
+      ]),
+    ]);
 
-    const propertyTypes = await prisma.property.groupBy({
-      by: ["property_type"],
-      where: { deleted_at: null },
-      _count: { property_type: true },
-    });
+    const formatMonth = (id: { y: number; m: number }) =>
+      new Date(Date.UTC(id.y, id.m - 1, 1)).toISOString();
+
+    const topAgentsRaw = await User.find({
+      role: "agent",
+      deleted_at: null,
+    })
+      .select("_id")
+      .lean<IUserLean[]>();
+
+    const topAgents = await Promise.all(
+      topAgentsRaw.slice(0, 10).map(async (a) => {
+        const id = String(a._id);
+        const [properties_count, txAgg] = await Promise.all([
+          Property.countDocuments({ agent_id: id, deleted_at: null }),
+          TransactionModel.countDocuments({
+            agent_id: id,
+            status: "closed",
+          }),
+        ]);
+        const u = (await User.findById(id).select("email name").lean<IUserLean | null>());
+        return {
+          id,
+          email: u?.email || "",
+          name: u?.name || "",
+          _count: {
+            properties: properties_count,
+            agentTransactions: txAgg,
+          },
+          properties_count,
+          sales_count: txAgg,
+        };
+      }),
+    );
+
+    const propertyTypes = await Property.aggregate([
+      { $match: { deleted_at: null } },
+      { $group: { _id: "$property_type", count: { $sum: 1 } } },
+    ]);
 
     const recentActivity = await Promise.all([
-      prisma.property.findMany({
-        where: { deleted_at: null },
-        orderBy: { created_at: "desc" },
-        take: 5,
-        select: { id: true, title: true, created_at: true },
-      }),
-      prisma.inquiry.findMany({
-        where: { deleted_at: null },
-        orderBy: { created_at: "desc" },
-        take: 5,
-        select: { id: true, message: true, created_at: true },
-      }),
-      prisma.offer.findMany({
-        where: { deleted_at: null },
-        orderBy: { created_at: "desc" },
-        take: 5,
-        select: { id: true, amount: true, created_at: true },
-      }),
+      Property.find({ deleted_at: null })
+        .sort({ created_at: -1 })
+        .limit(5)
+        .select("title created_at")
+        .lean<IPropertyLean[]>(),
+      Inquiry.find({ deleted_at: null })
+        .sort({ created_at: -1 })
+        .limit(5)
+        .select("message created_at")
+        .lean<IInquiryLean[]>(),
+      Offer.find({ deleted_at: null })
+        .sort({ created_at: -1 })
+        .limit(5)
+        .select("amount created_at")
+        .lean<IOfferLean[]>(),
     ]);
 
     const analytics = {
@@ -132,30 +183,56 @@ export async function GET(req: Request) {
         total_users: totalUsers,
         total_properties: totalProperties,
         total_sales: totalSales,
-        total_revenue: totalRevenue._sum.sale_price || 0,
+        total_revenue: totalRevenue,
         active_listings: activeListings,
         pending_offers: pendingOffers,
         total_inquiries: totalInquiries,
         total_appointments: totalAppointments,
       },
       monthly_stats: {
-        properties: monthlyStats,
-        sales: monthlySales,
-        users: monthlyUsers,
+        properties: monthlyStats.map((r: Record<string, unknown>) => ({
+          month: formatMonth(r._id as { y: number; m: number }),
+          properties_count: r.properties_count,
+          active_properties: r.active_properties,
+        })),
+        sales: monthlySales.map((r: Record<string, unknown>) => ({
+          month: formatMonth(r._id as { y: number; m: number }),
+          sales_count: r.sales_count,
+          revenue: r.revenue,
+        })),
+        users: monthlyUsers.map((r: Record<string, unknown>) => ({
+          month: formatMonth(r._id as { y: number; m: number }),
+          users_count: r.users_count,
+          agents_count: r.agents_count,
+        })),
       },
-      top_agents: topAgents.map((agent) => ({
+      top_agents: topAgents.map((agent: Record<string, unknown>) => ({
         ...agent,
-        properties_count: agent._count.properties,
-        sales_count: agent._count.transactions,
+        properties_count: agent.properties_count,
+        sales_count: agent.sales_count,
       })),
-      property_types: propertyTypes.map((type) => ({
-        type: type.property_type,
-        count: type._count.property_type,
-      })),
+      property_types: propertyTypes.map(
+        (t: { _id: string; count: number }) => ({
+          type: t._id,
+          count: t.count,
+        }),
+      ),
       recent_activity: {
-        properties: recentActivity[0],
-        inquiries: recentActivity[1],
-        offers: recentActivity[2],
+        properties: recentActivity[0].map((p) => ({
+          id: String(p._id),
+          title: p.title,
+          created_at: p.created_at,
+        })),
+        inquiries: recentActivity[1].map((i) => ({
+          id: String(i._id),
+          message: i.message,
+          created_at: i.created_at,
+        })),
+        offers: recentActivity[2].map((o) => ({
+          id: String(o._id),
+          amount: o.amount,
+          created_at: o.created_at,
+        })),
       },
     };
 

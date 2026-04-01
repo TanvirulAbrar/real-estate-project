@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { Offer, Property } from "@/lib/models";
 import { requireRole } from "@/lib/auth";
 import {
   ok,
@@ -8,10 +9,11 @@ import {
   serverError,
   notFound,
 } from "@/lib/response";
+import { IOfferLean, IPropertyLean } from "@/types";
 import { triggerNotification } from "@/lib/notify";
 import { parseBody } from "@/lib/validator";
 
-const idSchema = z.string().uuid();
+const idSchema = z.string().min(1);
 const counterSchema = z.object({
   counter_amount: z
     .string()
@@ -25,6 +27,7 @@ export async function POST(
   context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const session = await requireRole(req, ["agent", "admin"]);
     const { id } = await context.params;
     const parsedId = idSchema.safeParse(id);
@@ -33,17 +36,22 @@ export async function POST(
     const body = await parseBody(req, counterSchema);
     if (body instanceof Response) return body;
 
-    const offer = await prisma.offer.findUnique({
-      where: { id: parsedId.data, deleted_at: null } as any,
-      include: {
-        property: { select: { id: true, agent_id: true, title: true } },
-      },
-    });
+    const offer = await Offer.findOne({
+      _id: parsedId.data,
+      deleted_at: null,
+    }).lean<IOfferLean | null>();
 
     if (!offer) return notFound("Offer not found");
+
+    const property = await Property.findById(offer.property_id)
+      .select("agent_id title")
+      .lean<IPropertyLean | null>();
+
+    if (!property) return notFound("Property not found");
+
     if (
       session.user.role !== "admin" &&
-      offer.property.agent_id !== session.user.id
+      property.agent_id !== session.user.id
     ) {
       return forbidden("Forbidden");
     }
@@ -51,39 +59,38 @@ export async function POST(
       return badRequest("Only pending offers can be countered");
     }
 
-    const updatedOffer = await prisma.offer.update({
-      where: { id: parsedId.data },
-      data: {
+    const updatedOffer = await Offer.findByIdAndUpdate(
+      parsedId.data,
+      {
         status: "countered",
         message:
           body.message ||
           `Counter-offer: $${body.counter_amount.toLocaleString()}`,
       },
-    });
+      { new: true },
+    ).lean<IOfferLean | null>();
 
-    const counterOffer = await prisma.offer.create({
-      data: {
-        property_id: offer.property_id,
-        buyer_id: offer.property.agent_id,
-        amount: body.counter_amount,
-        message: `Counter-offer to original offer of $${Number(offer.amount).toLocaleString()}`,
-        expiry_date: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-        status: "pending",
-      },
+    const counterOffer = await Offer.create({
+      property_id: offer.property_id,
+      buyer_id: property.agent_id,
+      amount: body.counter_amount,
+      message: `Counter-offer to original offer of $${Number(offer.amount).toLocaleString()}`,
+      expiry_date: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      status: "pending",
     });
 
     await triggerNotification({
       userId: offer.buyer_id,
       type: "offer_received",
       title: "Counter-offer received",
-      body: `You received a counter-offer of $${body.counter_amount.toLocaleString()} for ${offer.property.title}.`,
-      relatedId: counterOffer.id,
+      body: `You received a counter-offer of $${body.counter_amount.toLocaleString()} for ${property.title}.`,
+      relatedId: String(counterOffer._id),
     });
 
     return ok({
       message: "Counter-offer created",
       original_offer: updatedOffer,
-      counter_offer: counterOffer,
+      counter_offer: counterOffer.toJSON(),
     });
   } catch (err) {
     console.error("[offers/[id]/counter] POST", err);

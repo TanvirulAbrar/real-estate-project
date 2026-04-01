@@ -1,7 +1,10 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
-import { HttpError, requireSession } from "@/lib/auth";
-import { badRequest, forbidden, ok, serverError } from "@/lib/response";
+import { connectDB } from "@/lib/mongodb";
+import { HttpError } from "@/lib/auth";
+import { requireSession } from "@/lib/auth";
+import { User } from "@/lib/models";
+import { ok, forbidden, serverError, badRequest } from "@/lib/response";
+import { IUserLean } from "@/types";
 
 const updateSchema = z.object({
   name: z.string().min(1).max(200).optional().nullable(),
@@ -15,23 +18,23 @@ type HandlerContext = { params: Promise<Params> };
 
 export async function GET(req: Request, context: HandlerContext) {
   try {
+    await connectDB();
     const session = await requireSession(req);
     const params = await context.params;
 
-    const user = await prisma.user.findUnique({
-      where: { id: params.id },
-    });
+    const user = await User.findById(params.id).lean<IUserLean | null>();
 
     if (!user || user.deleted_at) {
       throw new HttpError(404, "User not found");
     }
 
-    if (session.user.role !== "admin" && session.user.id !== user.id) {
+    const uid = String(user._id);
+    if (session.user.role !== "admin" && session.user.id !== uid) {
       return forbidden("Forbidden");
     }
 
     return ok({
-      id: user.id,
+      id: uid,
       email: user.email,
       name: user.name,
       phone: user.phone,
@@ -54,6 +57,7 @@ export async function GET(req: Request, context: HandlerContext) {
 
 export async function PUT(req: Request, context: HandlerContext) {
   try {
+    await connectDB();
     const session = await requireSession(req);
     const params = await context.params;
 
@@ -71,23 +75,24 @@ export async function PUT(req: Request, context: HandlerContext) {
       return badRequest("Validation failed", parsed.error.flatten());
     }
 
-    const user = await prisma.user.update({
-      where: { id: params.id },
-      data: parsed.data,
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        phone: true,
-        avatar_url: true,
-        bio: true,
-        role: true,
-        theme: true,
-        is_demo: true,
-      },
-    });
+    const user = await User.findByIdAndUpdate(params.id, parsed.data, {
+      new: true,
+      select: "email name phone avatar_url bio role theme is_demo",
+    }).lean<IUserLean | null>();
 
-    return ok(user);
+    if (!user) throw new HttpError(404, "User not found");
+
+    return ok({
+      id: String(user._id),
+      email: user.email,
+      name: user.name,
+      phone: user.phone,
+      avatar_url: user.avatar_url,
+      bio: user.bio,
+      role: user.role,
+      theme: user.theme,
+      is_demo: user.is_demo,
+    });
   } catch (err) {
     if (err instanceof HttpError) {
       return Response.json({ message: err.message }, { status: err.status });
@@ -99,6 +104,7 @@ export async function PUT(req: Request, context: HandlerContext) {
 
 export async function DELETE(req: Request, context: HandlerContext) {
   try {
+    await connectDB();
     const session = await requireSession(req);
     const params = await context.params;
 
@@ -106,13 +112,10 @@ export async function DELETE(req: Request, context: HandlerContext) {
       return forbidden("Forbidden");
     }
 
-    const user = await prisma.user.findUnique({ where: { id: params.id } });
+    const user = await User.findById(params.id).lean<IUserLean | null>();
     if (!user || user.deleted_at) throw new HttpError(404, "User not found");
 
-    await prisma.user.update({
-      where: { id: params.id },
-      data: { deleted_at: new Date() },
-    });
+    await User.findByIdAndUpdate(params.id, { deleted_at: new Date() });
 
     return ok({ message: "User deleted" });
   } catch (err) {
@@ -123,4 +126,3 @@ export async function DELETE(req: Request, context: HandlerContext) {
     return serverError();
   }
 }
-

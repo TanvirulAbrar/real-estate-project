@@ -1,14 +1,18 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { Property, Review } from "@/lib/models";
 import { requireSession } from "@/lib/auth";
-import { ok, badRequest, serverError, notFound } from "@/lib/response";
+import { ok, serverError, notFound } from "@/lib/response";
 import { parseQuery } from "@/lib/validator";
+import { IReviewLean, IPropertyLean } from "@/types";
 
 const querySchema = z.object({
-  property_id: z.string().uuid(),
+  property_id: z.string().min(1),
 });
 
-function generateReviewSummary(reviews: any[]): {
+function generateReviewSummary(
+  reviews: { rating: number; comment?: string | null }[],
+): {
   summary: string;
   sentiment: "positive" | "neutral" | "negative";
   key_points: string[];
@@ -30,7 +34,7 @@ function generateReviewSummary(reviews: any[]): {
   if (averageRating >= 4) sentiment = "positive";
   else if (averageRating <= 2) sentiment = "negative";
 
-  const allComments = reviews.map((r) => r.comment).filter(Boolean);
+  const allComments = reviews.map((r) => r.comment).filter(Boolean) as string[];
   const keyPoints: string[] = [];
 
   const commonKeywords = [
@@ -81,33 +85,31 @@ function generateReviewSummary(reviews: any[]): {
 
 export async function GET(req: Request) {
   try {
+    await connectDB();
     const session = await requireSession(req);
+    void session;
 
     const url = new URL(req.url);
     const query = parseQuery(url.searchParams, querySchema);
     if (query instanceof Response) return query;
 
-    const property = await prisma.property.findUnique({
-      where: { id: query.property_id, deleted_at: null },
-      select: { id: true, title: true },
-    });
+    const property = await Property.findOne({
+      _id: query.property_id,
+      deleted_at: null,
+    })
+      .select("title")
+      .lean<IPropertyLean | null>();
 
     if (!property) {
       return notFound("Property not found");
     }
 
-    const reviews = await prisma.review.findMany({
-      where: {
-        target_type: "property",
-        target_id: query.property_id,
-      },
-      include: {
-        author: {
-          select: { name: true, avatar_url: true },
-        },
-      },
-      orderBy: { created_at: "desc" },
-    });
+    const reviews = await Review.find({
+      target_type: "property",
+      target_id: query.property_id,
+    })
+      .sort({ created_at: -1 })
+      .lean<IReviewLean[]>();
 
     const summary = generateReviewSummary(reviews);
 

@@ -1,8 +1,10 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
-import { requireSession } from "@/lib/auth";
-import { ok, badRequest, serverError } from "@/lib/response";
+import { connectDB } from "@/lib/mongodb";
+import { Property } from "@/lib/models";
+import { ok, serverError } from "@/lib/response";
 import { parseQuery } from "@/lib/validator";
+import { escapeRegex } from "@/lib/mongoHelpers";
+import { IPropertyLean } from "@/types";
 
 const querySchema = z.object({
   q: z.string().min(1).max(100),
@@ -11,25 +13,19 @@ const querySchema = z.object({
 
 export async function GET(req: Request) {
   try {
+    await connectDB();
     const url = new URL(req.url);
     const query = parseQuery(url.searchParams, querySchema);
     if (query instanceof Response) return query;
 
     const limit = query.limit ?? 10;
-    const searchTerm = query.q.toLowerCase();
+    const rx = new RegExp(escapeRegex(query.q), "i");
 
-    const cities = await prisma.property.findMany({
-      where: {
-        deleted_at: null,
-        city: {
-          contains: searchTerm,
-          mode: "insensitive",
-        },
-      },
-      select: { city: true },
-      distinct: ["city"],
-      take: limit,
-    });
+    const cities = await Property.find({
+      deleted_at: null,
+      city: rx,
+    })
+      .distinct("city");
 
     const allPropertyTypes = [
       "house",
@@ -40,39 +36,36 @@ export async function GET(req: Request) {
       "commercial",
       "other",
     ];
+    const searchTerm = query.q.toLowerCase();
     const matchingPropertyTypes = allPropertyTypes.filter((type) =>
       type.toLowerCase().includes(searchTerm),
     );
 
-    const states = await prisma.property.findMany({
-      where: {
-        deleted_at: null,
-        state: {
-          contains: searchTerm,
-          mode: "insensitive",
-        },
-      },
-      select: { state: true },
-      distinct: ["state"],
-      take: limit,
-    });
+    const states = await Property.find({
+      deleted_at: null,
+      state: rx,
+    })
+      .distinct("state");
 
-    const titles = await prisma.property.findMany({
-      where: {
-        deleted_at: null,
-        title: {
-          contains: searchTerm,
-          mode: "insensitive",
-        },
-      },
-      select: { id: true, title: true, city: true, state: true },
-      take: limit,
-    });
+    const titleDocs = await Property.find({
+      deleted_at: null,
+      title: rx,
+    })
+      .select("title city state")
+      .limit(limit)
+      .lean<IPropertyLean[]>();
+
+    const titles = titleDocs.map((p) => ({
+      id: String(p._id),
+      title: p.title,
+      city: p.city,
+      state: p.state,
+    }));
 
     const suggestions = {
-      cities: cities.map((c) => c.city),
+      cities: cities.slice(0, limit),
       property_types: matchingPropertyTypes,
-      states: states.map((s) => s.state),
+      states: states.slice(0, limit),
       properties: titles,
     };
 

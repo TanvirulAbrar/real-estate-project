@@ -1,46 +1,57 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { User } from "@/lib/models";
 import { requireSession } from "@/lib/auth";
-import { ok, badRequest, serverError } from "@/lib/response";
+import { ok, serverError } from "@/lib/response";
 import { parseBody } from "@/lib/validator";
+import { IUserLean } from "@/types";
 
 const profileSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   phone: z.string().max(20).optional().nullable(),
   bio: z.string().max(1000).optional().nullable(),
   theme: z.enum(["light", "dark"]).optional(),
+  avatar_url: z.string().url().optional().nullable(),
 });
 
 export async function PUT(req: Request) {
   try {
+    await connectDB();
     const session = await requireSession(req);
 
     const body = await parseBody(req, profileSchema);
     if (body instanceof Response) return body;
 
-    const updated = await prisma.user.update({
-      where: { id: session.user.id },
-      data: {
-        ...(body.name !== undefined ? { name: body.name } : {}),
-        ...(body.phone !== undefined ? { phone: body.phone } : {}),
-        ...(body.bio !== undefined ? { bio: body.bio } : {}),
-        ...(body.theme !== undefined ? { theme: body.theme } : {}),
-      },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        phone: true,
-        avatar_url: true,
-        bio: true,
-        role: true,
-        theme: true,
-        is_demo: true,
-        created_at: true,
+    const data: Record<string, unknown> = {};
+    if (body.name !== undefined) data.name = body.name;
+    if (body.phone !== undefined) data.phone = body.phone;
+    if (body.bio !== undefined) data.bio = body.bio;
+    if (body.theme !== undefined) data.theme = body.theme;
+    if (body.avatar_url !== undefined) data.avatar_url = body.avatar_url;
+
+    const updated = await User.findByIdAndUpdate(session.user.id, data, {
+      new: true,
+      select:
+        "email name phone avatar_url bio role theme is_demo created_at",
+    }).lean<IUserLean | null>();
+
+    if (!updated) return serverError();
+
+    return ok({
+      message: "Profile updated",
+      user: {
+        id: String(updated._id),
+        email: updated.email,
+        name: updated.name,
+        phone: updated.phone,
+        avatar_url: updated.avatar_url,
+        bio: updated.bio,
+        role: updated.role,
+        theme: updated.theme,
+        is_demo: updated.is_demo,
+        created_at: updated.created_at,
       },
     });
-
-    return ok({ message: "Profile updated", user: updated });
   } catch (err) {
     console.error("[users/profile] PUT", err);
     return serverError();
@@ -49,23 +60,14 @@ export async function PUT(req: Request) {
 
 export async function GET(req: Request) {
   try {
+    await connectDB();
     const session = await requireSession(req);
 
-    const user = await prisma.user.findUnique({
-      where: { id: session.user.id },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        phone: true,
-        avatar_url: true,
-        bio: true,
-        role: true,
-        theme: true,
-        is_demo: true,
-        created_at: true,
-      },
-    });
+    const user = await User.findById(session.user.id)
+      .select(
+        "email name phone avatar_url bio role theme is_demo created_at",
+      )
+      .lean<IUserLean | null>();
 
     if (!user) {
       return new Response(JSON.stringify({ message: "User not found" }), {
@@ -74,7 +76,18 @@ export async function GET(req: Request) {
       });
     }
 
-    return ok(user);
+    return ok({
+      id: String(user._id),
+      email: user.email,
+      name: user.name,
+      phone: user.phone,
+      avatar_url: user.avatar_url,
+      bio: user.bio,
+      role: user.role,
+      theme: user.theme,
+      is_demo: user.is_demo,
+      created_at: user.created_at,
+    });
   } catch (err) {
     console.error("[users/profile] GET", err);
     return serverError();

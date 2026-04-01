@@ -1,17 +1,20 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { User } from "@/lib/models";
 import { requireRole, HttpError, type UserRole } from "@/lib/auth";
 import { parseBody } from "@/lib/validator";
-import { created, ok, serverError } from "@/lib/response";
+import { ok, serverError } from "@/lib/response";
+import { IUserLean } from "@/types";
 
 const schema = z.object({
-  userId: z.string().uuid().optional(),
-  id: z.string().uuid().optional(),
+  userId: z.string().min(1).optional(),
+  id: z.string().min(1).optional(),
   role: z.enum(["client", "agent", "admin"]),
 });
 
 export async function POST(req: Request) {
   try {
+    await connectDB();
     const session = await requireRole(req, ["admin"]);
     void session;
 
@@ -24,13 +27,23 @@ export async function POST(req: Request) {
         status: 400,
       });
 
-    const user = await prisma.user.update({
-      where: { id: userId },
-      data: { role: body.role as UserRole },
-      select: { id: true, email: true, role: true },
-    });
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { role: body.role as UserRole },
+      { new: true, select: "id email role" },
+    ).lean<IUserLean | null>();
 
-    return ok(user);
+    if (!user) {
+      return new Response(JSON.stringify({ message: "User not found" }), {
+        status: 404,
+      });
+    }
+
+    return ok({
+      id: String(user._id),
+      email: user.email,
+      role: user.role,
+    });
   } catch (err) {
     if (err instanceof HttpError) {
       return new Response(JSON.stringify({ message: err.message }), {

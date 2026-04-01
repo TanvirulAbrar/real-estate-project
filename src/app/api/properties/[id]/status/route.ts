@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import {
+  Property,
+  Favorite,
+  Inquiry,
+  TransactionModel,
+} from "@/lib/models";
 import { requireRole } from "@/lib/auth";
 import {
   ok,
@@ -10,8 +16,9 @@ import {
 } from "@/lib/response";
 import { parseBody } from "@/lib/validator";
 import { triggerNotification } from "@/lib/notify";
+import { IPropertyLean, ITransactionLean } from "@/types";
 
-const idSchema = z.string().uuid();
+const idSchema = z.string().min(1);
 const statusSchema = z.enum([
   "active",
   "pending",
@@ -28,6 +35,7 @@ export async function PUT(
   context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const session = await requireRole(req, ["agent", "admin"]);
     const { id } = await context.params;
     const parsedId = idSchema.safeParse(id);
@@ -36,16 +44,9 @@ export async function PUT(
     const body = await parseBody(req, bodySchema);
     if (body instanceof Response) return body;
 
-    const property = await prisma.property.findUnique({
-      where: { id: parsedId.data },
-      select: {
-        id: true,
-        agent_id: true,
-        title: true,
-        status: true,
-        deleted_at: true,
-      },
-    });
+    const property = await Property.findById(parsedId.data)
+      .select("agent_id title status deleted_at")
+      .lean<IPropertyLean | null>();
 
     if (!property || property.deleted_at) {
       return notFound("Property not found");
@@ -65,62 +66,51 @@ export async function PUT(
       return badRequest("Rented properties can only be reactivated");
     }
 
-    const updated = await prisma.property.update({
-      where: { id: parsedId.data },
-      data: { status: body.status },
-    });
+    const updated = await Property.findByIdAndUpdate(
+      parsedId.data,
+      { status: body.status },
+      { new: true },
+    ).lean<IPropertyLean | null>();
+
+    if (!updated) return serverError();
+
+    const pid = String(property._id);
 
     if (
       (body.status === "sold" || body.status === "rented") &&
       property.status !== body.status
     ) {
-      const existingTransaction = await prisma.transaction.findFirst({
-        where: {
-          property_id: property.id,
-          status: { in: ["pending", "in_escrow", "closed"] },
-        },
-      });
+      const existingTransaction = await TransactionModel.findOne({
+        property_id: pid,
+        status: { $in: ["pending", "in_escrow", "closed"] },
+      }).lean<ITransactionLean | null>();
 
       if (!existingTransaction) {
-        await prisma.transaction.create({
-          data: {
-            property_id: property.id,
-            buyer_id: session.user.id,
-            agent_id: property.agent_id,
-            sale_price: 0,
-            commission_rate: 0.03,
-            status: "pending",
-          },
+        await TransactionModel.create({
+          property_id: pid,
+          buyer_id: session.user.id,
+          agent_id: property.agent_id,
+          sale_price: 0,
+          commission_rate: 0.03,
+          status: "pending",
         });
       }
     }
 
     if (body.status === "sold" || body.status === "rented") {
-      const interestedUsers = await prisma.user.findMany({
-        where: {
-          OR: [
-            {
-              favorites: {
-                some: { property_id: property.id },
-              },
-            },
-            {
-              inquiries: {
-                some: { property_id: property.id },
-              },
-            },
-          ],
-        },
-        select: { id: true },
-      });
+      const [favUsers, inquiryUsers] = await Promise.all([
+        Favorite.distinct("user_id", { property_id: pid }),
+        Inquiry.distinct("client_id", { property_id: pid }),
+      ]);
+      const interested = [...new Set([...favUsers, ...inquiryUsers])];
 
-      for (const user of interestedUsers) {
+      for (const userId of interested) {
         await triggerNotification({
-          userId: user.id,
+          userId,
           type: "general",
           title: `Property ${body.status}`,
           body: `The property "${property.title}" has been ${body.status}.`,
-          relatedId: property.id,
+          relatedId: pid,
         });
       }
     }

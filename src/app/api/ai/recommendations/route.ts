@@ -1,8 +1,16 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { Favorite, Inquiry, Property, PropertyImage, User } from "@/lib/models";
 import { requireSession } from "@/lib/auth";
 import { ok, serverError } from "@/lib/response";
 import { parseQuery } from "@/lib/validator";
+import {
+  IFavoriteLean,
+  IPropertyLean,
+  IPropertyImageLean,
+  IUserLean,
+  IInquiryLean,
+} from "@/types";
 
 const querySchema = z.object({
   limit: z.coerce.number().int().min(1).max(20).optional(),
@@ -10,128 +18,159 @@ const querySchema = z.object({
 
 async function generateRecommendations(userId: string, limit: number = 10) {
   try {
-    const userFavorites = await prisma.favorite.findMany({
-      where: { user_id: userId },
-      include: {
-        property: {
-          select: {
-            property_type: true,
-            city: true,
-            state: true,
-            price: true,
-            bedrooms: true,
-            bathrooms: true,
-            area_sqft: true,
-          },
-        },
-      },
-      take: 10,
-    });
+    const favDocs = await Favorite.find({ user_id: userId })
+      .limit(10)
+      .lean<IFavoriteLean[]>();
+    const favPropertyIds = favDocs.map((f) => f.property_id);
 
-    const userInquiries = await prisma.inquiry.findMany({
-      where: { client_id: userId },
-      include: {
-        property: {
-          select: {
-            property_type: true,
-            city: true,
-            state: true,
-            price: true,
-            bedrooms: true,
-            bathrooms: true,
-          },
-        },
-      },
-      take: 10,
-    });
+    const propertiesFromFavorites = await Property.find({
+      _id: { $in: favPropertyIds },
+      deleted_at: null,
+    }).lean<IPropertyLean[]>();
 
-    const preferences = {
-      preferredCities: [...new Set(userFavorites.map((f) => f.property.city))],
-      preferredTypes: [
-        ...new Set(userFavorites.map((f) => f.property.property_type)),
-      ],
-      priceRange: {
-        min: Math.min(
-          ...userFavorites.map((f) => Number(f.property.price)),
-          100000,
-        ),
-        max: Math.max(
-          ...userFavorites.map((f) => Number(f.property.price)),
-          1000000,
-        ),
-      },
-      preferredBedrooms: [
-        ...new Set(
-          userFavorites.map((f) => f.property.bedrooms).filter(Boolean),
-        ),
-      ],
+    const preferredCities = [
+      ...new Set(propertiesFromFavorites.map((p) => p.city)),
+    ];
+    const preferredTypes = [
+      ...new Set(propertiesFromFavorites.map((p) => p.property_type)),
+    ];
+    const prices = propertiesFromFavorites.map((p) => Number(p.price));
+    const priceRange = {
+      min: prices.length ? Math.min(...prices, 100000) : 100000,
+      max: prices.length ? Math.max(...prices, 1000000) : 1000000,
     };
 
-    const recommendations = await prisma.property.findMany({
-      where: {
-        deleted_at: null,
-        status: "active",
-        city: {
-          in:
-            preferences.preferredCities.length > 0
-              ? preferences.preferredCities
-              : undefined,
-        },
-        property_type: {
-          in:
-            preferences.preferredTypes.length > 0
-              ? preferences.preferredTypes
-              : undefined,
-        },
-        price: {
-          gte: preferences.priceRange.min * 0.8,
-          lte: preferences.priceRange.max * 1.2,
-        },
+    await Inquiry.find({ client_id: userId }).limit(10).lean<IInquiryLean[]>();
 
-        NOT: {
-          favorites: {
-            some: { user_id: userId },
-          },
-        },
-      },
-      include: {
-        agent: {
-          select: { id: true, name: true, avatar_url: true },
-        },
-        images: {
-          where: { is_primary: true },
-          take: 1,
-          select: { url: true },
-        },
-        _count: {
-          select: { favorites: true, reviews: true },
-        },
-      },
-      orderBy: [{ favorites: { _count: "desc" } }, { created_at: "desc" }],
-      take: limit,
+    const recommendationsData = await Property.find({
+      deleted_at: null,
+      status: "active",
+      ...(preferredCities.length ? { city: { $in: preferredCities } } : {}),
+    })
+      .limit(5)
+      .lean<IPropertyLean[]>();
+
+    const recommendationsPropertyIds = recommendationsData.map((p) =>
+      String(p._id),
+    );
+    const primaryImages = await PropertyImage.find({
+      property_id: { $in: recommendationsPropertyIds },
+      is_primary: true,
+    }).lean<IPropertyImageLean[]>();
+
+    const imageMap = new Map(
+      primaryImages.map((img) => [img.property_id, img.url]),
+    );
+
+    const recommendationsWithData = recommendationsData.map((property) => {
+      const propertyId = String(property._id);
+      let reason = "Recommended based on your preferences";
+      if (preferredCities.includes(property.city)) {
+        reason = "Matches your preferred city";
+      }
+      return {
+        id: propertyId,
+        title: property.title,
+        price: property.price,
+        address: property.address,
+        city: property.city,
+        state: property.state,
+        bedrooms: property.bedrooms,
+        bathrooms: property.bathrooms,
+        area_sqft: property.area_sqft,
+        property_type: property.property_type,
+        image_url: imageMap.get(propertyId) || null,
+        reason,
+      };
     });
 
-    const recommendationsWithAI = recommendations.map((property) => {
-      let reason = "Recommended based on your preferences";
+    const excludeIds = [...favPropertyIds];
 
-      if (preferences.preferredCities.includes(property.city)) {
-        reason += ` in ${property.city}`;
+    const candidates = await Property.find({
+      deleted_at: null,
+      status: "active",
+      _id: { $nin: excludeIds },
+      ...(preferredCities.length ? { city: { $in: preferredCities } } : {}),
+      ...(preferredTypes.length
+        ? { property_type: { $in: preferredTypes } }
+        : {}),
+      price: {
+        $gte: priceRange.min * 0.8,
+        $lte: priceRange.max * 1.2,
+      },
+    })
+      .sort({ created_at: -1 })
+      .limit(limit)
+      .lean<IPropertyLean[]>();
+
+    const candidatePropertyIds = candidates.map((p) => String(p._id));
+    const candidateAgentIds = candidates.map((p) => p.agent_id).filter(Boolean);
+
+    const [candidateImages, candidateAgents] = await Promise.all([
+      PropertyImage.find({
+        property_id: { $in: candidatePropertyIds },
+        is_primary: true,
+      }).lean<IPropertyImageLean[]>(),
+      User.find({
+        _id: { $in: candidateAgentIds },
+      })
+        .select("name avatar_url")
+        .lean<IUserLean[]>(),
+    ]);
+
+    const candidateImageMap = new Map(
+      candidateImages.map((img) => [img.property_id, img.url]),
+    );
+    const candidateAgentMap = new Map(
+      candidateAgents.map((agent) => [String(agent._id), agent]),
+    );
+
+    const recommendationsWithAI = candidates.map((property) => {
+      const propertyId = String(property._id);
+      const agent = candidateAgentMap.get(property.agent_id);
+
+      let reason = "Recommended based on your preferences";
+      if (preferredCities.includes(property.city)) {
+        reason = "Matches your preferred city";
       }
-      if (preferences.preferredTypes.includes(property.property_type)) {
+      if (preferredTypes.includes(property.property_type)) {
         reason += ` matching your interest in ${property.property_type}s`;
       }
-      if (Number(property.price) <= preferences.priceRange.max) {
+      if (Number(property.price) <= priceRange.max) {
         reason += ` within your price range`;
       }
 
       return {
-        ...property,
+        id: propertyId,
+        title: property.title,
+        price: property.price,
+        address: property.address,
+        city: property.city,
+        state: property.state,
+        bedrooms: property.bedrooms,
+        bathrooms: property.bathrooms,
+        area_sqft: property.area_sqft,
+        property_type: property.property_type,
+        image_url: candidateImageMap.get(propertyId) || null,
+        agent: agent
+          ? {
+              id: String(agent._id),
+              name: agent.name,
+              avatar_url: agent.avatar_url,
+            }
+          : null,
         ai_reason: reason,
         match_score: Math.floor(Math.random() * 30) + 70,
       };
     });
 
-    return recommendationsWithAI;
+    return recommendationsWithAI.length
+      ? recommendationsWithAI
+      : recommendationsWithData.map((p) => ({
+          ...p,
+          ai_reason: p.reason,
+          match_score: Math.floor(Math.random() * 30) + 70,
+        }));
   } catch (error) {
     console.error("Error generating recommendations:", error);
     return [];
@@ -140,6 +179,7 @@ async function generateRecommendations(userId: string, limit: number = 10) {
 
 export async function GET(req: Request) {
   try {
+    await connectDB();
     const session = await requireSession(req);
 
     const url = new URL(req.url);

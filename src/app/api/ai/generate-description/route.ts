@@ -1,7 +1,8 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { AiDescriptionLog } from "@/lib/models";
 import { requireRole } from "@/lib/auth";
-import { ok, badRequest, serverError } from "@/lib/response";
+import { ok, serverError } from "@/lib/response";
 import { parseBody } from "@/lib/validator";
 
 const generateSchema = z.object({
@@ -26,7 +27,16 @@ const generateSchema = z.object({
   features: z.array(z.string()).max(20).optional(),
 });
 
-function generatePropertyDescription(data: any): string {
+function generatePropertyDescription(data: {
+  property_type: string;
+  bedrooms?: number;
+  bathrooms?: number;
+  area_sqft?: number;
+  city: string;
+  state: string;
+  price: number;
+  features?: string[];
+}): string {
   const {
     property_type,
     bedrooms,
@@ -50,7 +60,6 @@ function generatePropertyDescription(data: any): string {
 
   description += `this home offers ample room for comfortable living and entertaining. `;
 
-  // Add features
   if (features && features.length > 0) {
     description += `Notable features include ${features.slice(0, 3).join(", ")}`;
     if (features.length > 3) {
@@ -69,6 +78,7 @@ function generatePropertyDescription(data: any): string {
 
 export async function POST(req: Request) {
   try {
+    await connectDB();
     const session = await requireRole(req, ["agent", "admin"]);
 
     const body = await parseBody(req, generateSchema);
@@ -76,10 +86,11 @@ export async function POST(req: Request) {
 
     const description = generatePropertyDescription(body);
 
-    await prisma.$queryRaw`
-      INSERT INTO ai_description_logs (user_id, property_data, generated_description, created_at)
-      VALUES (${session.user.id}, ${JSON.stringify(body)}, ${description}, NOW())
-    `;
+    await AiDescriptionLog.create({
+      user_id: session.user.id,
+      property_data: body,
+      generated_description: description,
+    });
 
     return ok({
       description,

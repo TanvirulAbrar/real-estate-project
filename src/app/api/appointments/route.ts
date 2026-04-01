@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { Appointment, Property } from "@/lib/models";
 import { requireSession } from "@/lib/auth";
 import {
   ok,
@@ -8,12 +9,13 @@ import {
   forbidden,
   serverError,
 } from "@/lib/response";
+import { IPropertyLean, IAppointmentLean } from "@/types";
 import { parseQuery } from "@/lib/validator";
 import { triggerNotification } from "@/lib/notify";
 
 const createSchema = z.object({
-  property_id: z.string().uuid(),
-  agent_id: z.string().uuid(),
+  property_id: z.string().min(1),
+  agent_id: z.string().min(1),
   scheduled_at: z.string().datetime(),
   notes: z.string().max(2000).optional().nullable(),
 });
@@ -22,6 +24,7 @@ const listQuerySchema = z.object({});
 
 export async function POST(req: Request) {
   try {
+    await connectDB();
     const session = await requireSession(req);
     void session;
 
@@ -36,10 +39,12 @@ export async function POST(req: Request) {
       return badRequest("scheduled_at cannot be in the past");
     }
 
-    const property = await prisma.property.findUnique({
-      where: { id: parsed.data.property_id, deleted_at: null },
-      select: { id: true, agent_id: true },
-    });
+    const property = await Property.findOne({
+      _id: parsed.data.property_id,
+      deleted_at: null,
+    })
+      .select("agent_id")
+      .lean<IPropertyLean | null>();
     if (!property) {
       return new Response(JSON.stringify({ message: "Property not found" }), {
         status: 404,
@@ -51,15 +56,14 @@ export async function POST(req: Request) {
       return forbidden("Agent does not match the property listing");
     }
 
-    const conflict = await prisma.appointment.findFirst({
-      where: {
-        agent_id: parsed.data.agent_id,
-        status: "confirmed",
-        scheduled_at: scheduledAt,
-        deleted_at: null,
-      },
-      select: { id: true },
-    });
+    const conflict = await Appointment.findOne({
+      agent_id: parsed.data.agent_id,
+      status: "confirmed",
+      scheduled_at: scheduledAt,
+      deleted_at: null,
+    })
+      .select("_id")
+      .lean<IAppointmentLean | null>();
     if (conflict) {
       return new Response(JSON.stringify({ message: "Appointment conflict" }), {
         status: 409,
@@ -67,26 +71,40 @@ export async function POST(req: Request) {
       });
     }
 
-    const appointment = await prisma.appointment.create({
-      data: {
-        property_id: parsed.data.property_id,
-        client_id: session.user.id,
-        agent_id: parsed.data.agent_id,
-        scheduled_at: scheduledAt,
-        notes: parsed.data.notes ?? null,
-        status: "pending",
-      },
+    const appointment = await Appointment.create({
+      property_id: parsed.data.property_id,
+      client_id: session.user.id,
+      agent_id: parsed.data.agent_id,
+      scheduled_at: scheduledAt,
+      notes: parsed.data.notes ?? undefined,
+      status: "pending",
     });
+
+    const aid = String(appointment._id);
 
     await triggerNotification({
       userId: parsed.data.agent_id,
       type: "appointment_scheduled",
       title: "Appointment scheduled",
       body: `Client scheduled a showing for ${scheduledAt.toISOString()}`,
-      relatedId: appointment.id,
+      relatedId: aid,
     });
 
-    return created(appointment);
+    const prop = await Property.findById(parsed.data.property_id)
+      .select("title city state")
+      .lean<IPropertyLean | null>();
+
+    return created({
+      ...appointment.toJSON(),
+      property: prop
+        ? {
+            id: String(prop._id),
+            title: prop.title,
+            city: prop.city,
+            state: prop.state,
+          }
+        : null,
+    });
   } catch (err) {
     console.error("[appointments] POST", err);
     return serverError();
@@ -95,31 +113,48 @@ export async function POST(req: Request) {
 
 export async function GET(req: Request) {
   try {
+    await connectDB();
     const session = await requireSession(req);
 
     const url = new URL(req.url);
     const _query = parseQuery(url.searchParams, listQuerySchema);
     if (_query instanceof Response) return _query;
 
-    let where: any = { deleted_at: null };
+    const filter: Record<string, unknown> = { deleted_at: null };
     if (session.user.role === "admin") {
     } else if (session.user.role === "agent") {
-      where = { ...where, agent_id: session.user.id };
+      filter.agent_id = session.user.id;
     } else {
-      where = { ...where, client_id: session.user.id };
+      filter.client_id = session.user.id;
     }
 
-    const appointments = await prisma.appointment.findMany({
-      where,
-      orderBy: { scheduled_at: "asc" },
-      include: {
-        property: {
-          select: { id: true, title: true, city: true, state: true },
-        },
-      },
+    const appointments = await Appointment.find(filter)
+      .sort({ scheduled_at: 1 })
+      .lean<IAppointmentLean[]>();
+
+    const propIds = [...new Set(appointments.map((a) => a.property_id))];
+    const props = await Property.find({ _id: { $in: propIds } })
+      .select("title city state")
+      .lean<IPropertyLean[]>();
+    const propMap = new Map(props.map((p) => [String(p._id), p]));
+
+    const out = appointments.map((a) => {
+      const p = propMap.get(a.property_id);
+      return {
+        ...a,
+        id: String(a._id),
+        property: p
+          ? {
+              id: String(p._id),
+              title: p.title,
+              city: p.city,
+              state: p.state,
+            }
+          : null,
+      };
     });
 
-    return ok(appointments);
+    return ok(out);
   } catch (err) {
     console.error("[appointments] GET", err);
     return serverError();

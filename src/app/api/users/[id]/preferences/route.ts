@@ -1,8 +1,10 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { User } from "@/lib/models";
 import { HttpError, requireSession } from "@/lib/auth";
 import { forbidden, ok, serverError } from "@/lib/response";
 import { parseBody } from "@/lib/validator";
+import { IUserLean } from "@/types";
 
 const schema = z.object({
   theme: z.enum(["light", "dark"]),
@@ -10,9 +12,10 @@ const schema = z.object({
 
 export async function PUT(
   req: Request,
-  context: { params: Promise<{ id: string }> }
+  context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const session = await requireSession(req);
     const params = await context.params;
 
@@ -23,25 +26,22 @@ export async function PUT(
     const body = await parseBody(req, schema);
     if (body instanceof Response) return body;
 
-    const user = await prisma.user.update({
-      where: { id: params.id },
-      data: { theme: body.theme },
-      select: { id: true, theme: true },
-    });
+    const user = await User.findByIdAndUpdate(
+      params.id,
+      { theme: body.theme },
+      { new: true, select: "theme" },
+    ).lean<IUserLean | null>();
 
-    return ok({ id: user.id, theme: user.theme ?? "light" });
+    if (!user) {
+      return Response.json({ message: "User not found" }, { status: 404 });
+    }
+
+    return ok({ id: params.id, theme: user.theme ?? "light" });
   } catch (err) {
     if (err instanceof HttpError) {
       return Response.json({ message: err.message }, { status: err.status });
-    }
-    if (
-      err instanceof Error &&
-      err.message.includes("Record to update not found")
-    ) {
-      return Response.json({ message: "User not found" }, { status: 404 });
     }
     console.error("[users/[id]/preferences] PUT", err);
     return serverError();
   }
 }
-

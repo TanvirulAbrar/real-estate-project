@@ -1,57 +1,65 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
-import { badRequest, ok, conflict, serverError } from "@/lib/response";
-import { parseBody } from "@/lib/validator";
 import { hash } from "bcryptjs";
+import { connectDB } from "@/lib/mongodb";
+import { User } from "@/lib/models";
+import { ok, conflict, serverError } from "@/lib/response";
+import { parseBody } from "@/lib/validator";
+import { IUserLean } from "@/types";
 
-const registerSchema = z.object({
-  name: z.string().min(2).max(100),
-  email: z.string().email(),
-  password: z.string().min(6).max(100),
-  phone: z.string().max(20).optional(),
-  role: z.enum(["client", "agent"]).default("client"),
-});
+const registerSchema = z
+  .object({
+    name: z.string().min(2).max(100).optional(),
+    fullName: z.string().min(2).max(100).optional(),
+    email: z.string().email(),
+    password: z.string().min(6).max(100),
+    phone: z.string().max(20).optional().or(z.literal("")),
+    role: z.enum(["client", "agent"]).default("client"),
+  })
+  .refine((data) => !!(data.name?.trim() || data.fullName?.trim()), {
+    message: "Name is required",
+    path: ["name"],
+  });
 
 export async function POST(req: Request) {
   try {
+    await connectDB();
+
     const body = await parseBody(req, registerSchema);
     if (body instanceof Response) return body;
 
-    const existingUser = await prisma.user.findFirst({
-      where: {
-        OR: [{ email: body.email }],
-      },
-    });
+    const displayName = (body.name ?? body.fullName ?? "").trim();
+
+    const existingUser = await User.findOne({
+      email: body.email,
+    }).lean<IUserLean | null>();
 
     if (existingUser) {
       return conflict("User with this email already exists");
     }
 
-    // Hash password
     const hashedPassword = await hash(body.password, 12);
+    const phone = body.phone?.trim() || undefined;
 
-    // Create user
-    const user = await prisma.user.create({
-      data: {
-        name: body.name,
-        email: body.email,
-        password: hashedPassword,
-        phone: body.phone || null,
-        role: body.role,
-      },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        phone: true,
-        role: true,
-        created_at: true,
-      },
+    const user = await User.create({
+      name: displayName,
+      email: body.email,
+      password: hashedPassword,
+      phone,
+      role: body.role || "client",
     });
 
+    const plain = user.toJSON();
+
     return ok({
+      success: true,
       message: "User registered successfully",
-      user,
+      user: {
+        id: plain.id,
+        name: plain.name,
+        email: plain.email,
+        role: plain.role,
+        created_at: plain.created_at,
+      },
     });
   } catch (err) {
     console.error("[auth/register] POST", err);

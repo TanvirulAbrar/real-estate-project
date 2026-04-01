@@ -1,12 +1,14 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { TransactionModel, Property, User } from "@/lib/models";
 import { requireRole, requireSession } from "@/lib/auth";
 import { ok, badRequest, forbidden, serverError, notFound } from "@/lib/response";
 import { parseBody } from "@/lib/validator";
 import { triggerNotification } from "@/lib/notify";
 import { toNumberOrNull } from "@/lib/serialization";
+import { ITransactionLean, IPropertyLean, IUserLean } from "@/types";
 
-const idSchema = z.string().uuid();
+const idSchema = z.string().min(1);
 
 const putSchema = z.object({
   status: z.enum(["pending", "in_escrow", "closed", "cancelled"]).optional(),
@@ -15,22 +17,16 @@ const putSchema = z.object({
 
 export async function GET(
   req: Request,
-  context: { params: Promise<{ id: string }> }
+  context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const session = await requireSession(req);
     const { id } = await context.params;
     const parsedId = idSchema.safeParse(id);
     if (!parsedId.success) return badRequest("Invalid id");
 
-    const tx = await prisma.transaction.findUnique({
-      where: { id: parsedId.data },
-      include: {
-        property: { select: { id: true, title: true, status: true } },
-        buyer: { select: { id: true, email: true, name: true } },
-        agent: { select: { id: true, email: true, name: true } },
-      },
-    });
+    const tx = await TransactionModel.findById(parsedId.data).lean<ITransactionLean | null>();
 
     if (!tx) return notFound("Transaction not found");
 
@@ -41,10 +37,33 @@ export async function GET(
       if (!allowed) return forbidden("Forbidden");
     }
 
+    const [property, buyer, agent] = await Promise.all([
+      Property.findById(tx.property_id).select("title status").lean<IPropertyLean | null>(),
+      User.findById(tx.buyer_id).select("email name").lean<IUserLean | null>(),
+      User.findById(tx.agent_id).select("email name").lean<IUserLean | null>(),
+    ]);
+
     return ok({
       ...tx,
-      sale_price: toNumberOrNull(tx.sale_price) ?? 0,
-      commission_rate: toNumberOrNull(tx.commission_rate) ?? 0,
+      id: String(tx._id),
+      sale_price: toNumberOrNull(tx.sale_price as unknown) ?? Number(tx.sale_price) ?? 0,
+      commission_rate:
+        toNumberOrNull(tx.commission_rate as unknown) ??
+        Number(tx.commission_rate) ??
+        0,
+      property: property
+        ? {
+            id: String(property._id),
+            title: property.title,
+            status: property.status,
+          }
+        : null,
+      buyer: buyer
+        ? { id: String(buyer._id), email: buyer.email, name: buyer.name }
+        : null,
+      agent: agent
+        ? { id: String(agent._id), email: agent.email, name: agent.name }
+        : null,
     });
   } catch (err) {
     console.error("[transactions/[id]] GET", err);
@@ -54,9 +73,10 @@ export async function GET(
 
 export async function PUT(
   req: Request,
-  context: { params: Promise<{ id: string }> }
+  context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const session = await requireRole(req, ["agent", "admin"]);
     const { id } = await context.params;
     const parsedId = idSchema.safeParse(id);
@@ -65,10 +85,9 @@ export async function PUT(
     const body = await parseBody(req, putSchema);
     if (body instanceof Response) return body;
 
-    const tx = await prisma.transaction.findUnique({
-      where: { id: parsedId.data },
-      select: { id: true, property_id: true, buyer_id: true, agent_id: true, status: true },
-    });
+    const tx = await TransactionModel.findById(parsedId.data)
+      .select("property_id buyer_id agent_id status")
+      .lean<ITransactionLean | null>();
 
     if (!tx) return notFound("Transaction not found");
 
@@ -77,40 +96,49 @@ export async function PUT(
     }
 
     const nextStatus = body.status ?? tx.status;
-    const nextClosingDate = body.closing_date !== undefined
-      ? (body.closing_date === null ? null : new Date(body.closing_date))
-      : undefined;
+    const nextClosingDate =
+      body.closing_date !== undefined
+        ? body.closing_date === null
+          ? null
+          : new Date(body.closing_date)
+        : undefined;
 
-    const updated = await prisma.transaction.update({
-      where: { id: tx.id },
-      data: {
+    const updated = await TransactionModel.findByIdAndUpdate(
+      tx._id,
+      {
         ...(body.status !== undefined ? { status: body.status } : {}),
-        ...(nextClosingDate !== undefined ? { closing_date: nextClosingDate } : {}),
+        ...(nextClosingDate !== undefined
+          ? { closing_date: nextClosingDate }
+          : {}),
       },
-      include: {
-        property: { select: { id: true, status: true } },
-      },
-    });
+      { new: true },
+    ).lean<ITransactionLean | null>();
+
+    if (!updated) return serverError();
+
+    const prop = await Property.findById(tx.property_id)
+      .select("status")
+      .lean<IPropertyLean | null>();
 
     if (nextStatus === "closed") {
-      await prisma.property.update({
-        where: { id: tx.property_id },
-        data: { status: "sold" },
-      });
+      await Property.findByIdAndUpdate(tx.property_id, { status: "sold" });
 
       await triggerNotification({
         userId: tx.buyer_id,
         type: "transaction_closed",
         title: "Transaction closed",
         body: "The transaction has been marked as closed.",
-        relatedId: tx.id,
+        relatedId: String(tx._id),
       });
     }
 
-    return ok(updated);
+    return ok({
+      ...updated,
+      id: String(updated._id),
+      property: prop ? { id: tx.property_id, status: prop.status } : null,
+    });
   } catch (err) {
     console.error("[transactions/[id]] PUT", err);
     return serverError();
   }
 }
-

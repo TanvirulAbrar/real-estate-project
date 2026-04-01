@@ -1,67 +1,82 @@
-import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { Property, Favorite } from "@/lib/models";
 import { ok, serverError } from "@/lib/response";
+import { toNumberOrNull } from "@/lib/serialization";
+import { IPropertyLean } from "@/types";
 
-export async function GET(req: Request) {
+export async function GET(_req: Request) {
   try {
-    const popularCities = await prisma.property.groupBy({
-      by: ["city"],
-      where: { deleted_at: null },
-      _count: { city: true },
-      orderBy: { _count: { city: "desc" } },
-      take: 10,
-    });
+    await connectDB();
 
-    const popularTypes = await prisma.property.groupBy({
-      by: ["property_type"],
-      where: { deleted_at: null },
-      _count: { property_type: true },
-      orderBy: { _count: { property_type: "desc" } },
-      take: 5,
-    });
+    const popularCities = await Property.aggregate([
+      { $match: { deleted_at: null } },
+      { $group: { _id: "$city", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 10 },
+    ]);
 
-    const popularProperties = await prisma.property.findMany({
-      where: { deleted_at: null, status: "active" },
-      orderBy: {
-        favorites: {
-          _count: "desc",
+    const popularTypes = await Property.aggregate([
+      { $match: { deleted_at: null } },
+      { $group: { _id: "$property_type", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 5 },
+    ]);
+
+    const topFavorited = await Favorite.aggregate([
+      { $group: { _id: "$property_id", favorite_count: { $sum: 1 } } },
+      { $sort: { favorite_count: -1 } },
+      { $limit: 5 },
+    ]);
+
+    const topIds = topFavorited.map((t) => t._id);
+    const popularPropsDocs = await Property.find({
+      _id: { $in: topIds },
+      deleted_at: null,
+      status: "active",
+    }).lean<IPropertyLean[]>();
+
+    const countMap = new Map(
+      topFavorited.map((t) => [t._id as string, t.favorite_count]),
+    );
+
+    const popularProperties = popularPropsDocs.map((p) => ({
+      id: String(p._id),
+      title: p.title,
+      city: p.city,
+      state: p.state,
+      price: p.price,
+      property_type: p.property_type,
+      _count: { favorites: countMap.get(String(p._id)) ?? 0 },
+    }));
+
+    const priceStats = await Property.aggregate([
+      { $match: { deleted_at: null, status: "active" } },
+      {
+        $group: {
+          _id: null,
+          min: { $min: "$price" },
+          max: { $max: "$price" },
+          avg: { $avg: "$price" },
         },
       },
-      take: 5,
-      select: {
-        id: true,
-        title: true,
-        city: true,
-        state: true,
-        price: true,
-        property_type: true,
-        _count: {
-          select: { favorites: true },
-        },
-      },
-    });
+    ]);
 
-    const priceStats = await prisma.property.aggregate({
-      where: { deleted_at: null, status: "active" },
-      _min: { price: true },
-      _max: { price: true },
-      _avg: { price: true },
-    });
+    const ps = priceStats[0];
 
     const popular = {
       cities: popularCities.map((c) => ({
-        city: c.city,
-        count: c._count.city,
+        city: c._id,
+        count: c.count,
       })),
       property_types: popularTypes.map((t) => ({
-        type: t.property_type,
-        count: t._count.property_type,
+        type: t._id,
+        count: t.count,
       })),
       properties: popularProperties,
       price_range: {
-        min: priceStats._min.price,
-        max: priceStats._max.price,
-        avg: priceStats._avg.price,
+        min: ps ? toNumberOrNull(ps.min as unknown) : null,
+        max: ps ? toNumberOrNull(ps.max as unknown) : null,
+        avg: ps ? toNumberOrNull(ps.avg as unknown) : null,
       },
     };
 

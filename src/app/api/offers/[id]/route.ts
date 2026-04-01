@@ -1,12 +1,27 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { Offer, Property } from "@/lib/models";
 import { requireRole, requireSession } from "@/lib/auth";
-import { ok, badRequest, forbidden, serverError, notFound, unprocessable } from "@/lib/response";
+import {
+  ok,
+  badRequest,
+  forbidden,
+  serverError,
+  notFound,
+  unprocessable,
+} from "@/lib/response";
+import { IOfferLean, IPropertyLean } from "@/types";
 import { parseBody } from "@/lib/validator";
 import { triggerNotification } from "@/lib/notify";
 
-const idSchema = z.string().uuid();
-const statusSchema = z.enum(["pending", "accepted", "rejected", "countered", "withdrawn"]);
+const idSchema = z.string().min(1);
+const statusSchema = z.enum([
+  "pending",
+  "accepted",
+  "rejected",
+  "countered",
+  "withdrawn",
+]);
 
 const putSchema = z.object({
   status: statusSchema,
@@ -14,33 +29,47 @@ const putSchema = z.object({
 
 export async function GET(
   req: Request,
-  context: { params: Promise<{ id: string }> }
+  context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const session = await requireSession(req);
     const { id } = await context.params;
     const parsedId = idSchema.safeParse(id);
     if (!parsedId.success) return badRequest("Invalid id");
 
-    const offer = await prisma.offer.findUnique({
-      where: { id: parsedId.data, deleted_at: null } as any,
-      include: {
-        property: {
-          select: { id: true, agent_id: true, title: true, city: true, state: true },
-        },
-      },
-    });
+    const offer = await Offer.findOne({
+      _id: parsedId.data,
+      deleted_at: null,
+    }).lean<IOfferLean | null>();
 
     if (!offer) return notFound("Offer not found");
 
+    const property = await Property.findById(offer.property_id)
+      .select("agent_id title city state")
+      .lean<IPropertyLean | null>();
+
     if (session.user.role !== "admin") {
       const allowed =
-        (session.user.role === "agent" && offer.property.agent_id === session.user.id) ||
+        (session.user.role === "agent" &&
+          property?.agent_id === session.user.id) ||
         (session.user.role === "client" && offer.buyer_id === session.user.id);
       if (!allowed) return forbidden("Forbidden");
     }
 
-    return ok(offer);
+    return ok({
+      ...offer,
+      id: String(offer._id),
+      property: property
+        ? {
+            id: String(property._id),
+            agent_id: property.agent_id,
+            title: property.title,
+            city: property.city,
+            state: property.state,
+          }
+        : null,
+    });
   } catch (err) {
     console.error("[offers/[id]] GET", err);
     return serverError();
@@ -49,9 +78,10 @@ export async function GET(
 
 export async function PUT(
   req: Request,
-  context: { params: Promise<{ id: string }> }
+  context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const session = await requireRole(req, ["agent", "admin"]);
     const { id } = await context.params;
     const parsedId = idSchema.safeParse(id);
@@ -60,23 +90,31 @@ export async function PUT(
     const body = await parseBody(req, putSchema);
     if (body instanceof Response) return body;
 
-    const offer = await prisma.offer.findUnique({
-      where: { id: parsedId.data, deleted_at: null } as any,
-      include: {
-        property: { select: { id: true, agent_id: true } },
-      },
-    });
+    const offer = await Offer.findOne({
+      _id: parsedId.data,
+      deleted_at: null,
+    }).lean<IOfferLean | null>();
 
     if (!offer) return notFound("Offer not found");
 
-    if (session.user.role !== "admin" && offer.property.agent_id !== session.user.id) {
+    const property = await Property.findById(offer.property_id)
+      .select("agent_id")
+      .lean<IPropertyLean | null>();
+
+    if (
+      session.user.role !== "admin" &&
+      property?.agent_id !== session.user.id
+    ) {
       return forbidden("Forbidden");
     }
 
-    const updated = await prisma.offer.update({
-      where: { id: parsedId.data },
-      data: { status: body.status },
-    });
+    const updated = await Offer.findByIdAndUpdate(
+      parsedId.data,
+      { status: body.status },
+      { new: true },
+    ).lean<IOfferLean | null>();
+
+    if (!updated) return serverError();
 
     if (body.status === "accepted") {
       await triggerNotification({
@@ -84,7 +122,7 @@ export async function PUT(
         type: "offer_accepted",
         title: "Offer accepted",
         body: "Your offer has been accepted.",
-        relatedId: updated.id,
+        relatedId: String(updated._id),
       });
     }
     if (body.status === "rejected") {
@@ -93,7 +131,7 @@ export async function PUT(
         type: "offer_rejected",
         title: "Offer rejected",
         body: "Your offer has been rejected.",
-        relatedId: updated.id,
+        relatedId: String(updated._id),
       });
     }
 
@@ -106,18 +144,21 @@ export async function PUT(
 
 export async function DELETE(
   req: Request,
-  context: { params: Promise<{ id: string }> }
+  context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const session = await requireSession(req);
     const { id } = await context.params;
     const parsedId = idSchema.safeParse(id);
     if (!parsedId.success) return badRequest("Invalid id");
 
-    const offer = await prisma.offer.findUnique({
-      where: { id: parsedId.data, deleted_at: null } as any,
-      select: { id: true, buyer_id: true, status: true },
-    });
+    const offer = await Offer.findOne({
+      _id: parsedId.data,
+      deleted_at: null,
+    })
+      .select("buyer_id status")
+      .lean<IOfferLean | null>();
 
     if (!offer) return notFound("Offer not found");
 
@@ -129,9 +170,8 @@ export async function DELETE(
       return unprocessable("Only pending offers can be withdrawn");
     }
 
-    await prisma.offer.update({
-      where: { id: parsedId.data },
-      data: { deleted_at: new Date() },
+    await Offer.findByIdAndUpdate(parsedId.data, {
+      deleted_at: new Date(),
     });
 
     return ok({ message: "Offer withdrawn" });
@@ -140,4 +180,3 @@ export async function DELETE(
     return serverError();
   }
 }
-

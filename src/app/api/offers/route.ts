@@ -1,34 +1,19 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
-import { requireRole, requireSession } from "@/lib/auth";
-import {
-  ok,
-  created,
-  badRequest,
-  conflict,
-  forbidden,
-  serverError,
-  notFound,
-  unprocessable,
-} from "@/lib/response";
+import { connectDB } from "@/lib/mongodb";
+import { Offer, Property, PropertyImage } from "@/lib/models";
+import { requireSession } from "@/lib/auth";
+import { ok, created, badRequest, serverError, notFound } from "@/lib/response";
 import { parseQuery } from "@/lib/validator";
 import { triggerNotification } from "@/lib/notify";
 import { toNumberOrNull } from "@/lib/serialization";
+import { IOfferLean, IPropertyLean, IPropertyImageLean } from "@/types";
 
 const createSchema = z.object({
-  property_id: z.string().uuid(),
+  property_id: z.string().min(1),
   amount: z.coerce.number().positive(),
   message: z.string().max(2000).optional().nullable(),
   expiry_date: z.string().datetime(),
 });
-
-const statusSchema = z.enum([
-  "pending",
-  "accepted",
-  "rejected",
-  "countered",
-  "withdrawn",
-]);
 
 const querySchema = z.object({
   page: z.coerce.number().int().min(1).optional(),
@@ -46,6 +31,7 @@ function pagination(total: number, page: number, limit: number) {
 
 export async function POST(req: Request) {
   try {
+    await connectDB();
     const session = await requireSession(req);
 
     const raw = await req.json().catch(() => null);
@@ -59,32 +45,32 @@ export async function POST(req: Request) {
       return badRequest("expiry_date cannot be in the past");
     }
 
-    const property = await prisma.property.findUnique({
-      where: { id: parsed.data.property_id, deleted_at: null },
-      select: { id: true, agent_id: true },
-    });
+    const property = await Property.findOne({
+      _id: parsed.data.property_id,
+      deleted_at: null,
+    })
+      .select("agent_id")
+      .lean<IPropertyLean | null>();
     if (!property) return notFound("Property not found");
 
-    const offer = await prisma.offer.create({
-      data: {
-        property_id: parsed.data.property_id,
-        buyer_id: session.user.id,
-        amount: parsed.data.amount as any,
-        message: parsed.data.message ?? null,
-        expiry_date: expiryDate,
-        status: "pending",
-      },
+    const offer = await Offer.create({
+      property_id: parsed.data.property_id,
+      buyer_id: session.user.id,
+      amount: parsed.data.amount,
+      message: parsed.data.message ?? undefined,
+      expiry_date: expiryDate,
+      status: "pending",
     });
 
     await triggerNotification({
       userId: property.agent_id,
       type: "offer_received",
       title: "New offer received",
-      body: `Offer submitted: $${toNumberOrNull(offer.amount) ?? 0}`,
-      relatedId: offer.id,
+      body: `Offer submitted: $${toNumberOrNull(offer.amount as unknown) ?? Number(offer.amount) ?? 0}`,
+      relatedId: String(offer._id),
     });
 
-    return created(offer);
+    return created(offer.toJSON());
   } catch (err) {
     console.error("[offers] POST", err);
     return serverError();
@@ -93,6 +79,7 @@ export async function POST(req: Request) {
 
 export async function GET(req: Request) {
   try {
+    await connectDB();
     const session = await requireSession(req);
     const url = new URL(req.url);
     const q = parseQuery(url.searchParams, querySchema);
@@ -101,60 +88,63 @@ export async function GET(req: Request) {
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;
 
-    let where: any = { deleted_at: null };
+    let filter: Record<string, unknown> = { deleted_at: null };
     if (session.user.role === "admin") {
     } else if (session.user.role === "agent") {
-      const propertyIds = await prisma.property
-        .findMany({
-          where: { agent_id: session.user.id, deleted_at: null },
-          select: { id: true },
-        })
-        .then((rows) => rows.map((r) => r.id));
-      where = { ...where, property_id: { in: propertyIds } };
+      const props = await Property.find({
+        agent_id: session.user.id,
+        deleted_at: null,
+      })
+        .select("_id")
+        .lean<IPropertyLean[]>();
+      const propertyIds = props.map((p) => String(p._id));
+      filter = { ...filter, property_id: { $in: propertyIds } };
     } else {
-      where = { ...where, buyer_id: session.user.id };
+      filter = { ...filter, buyer_id: session.user.id };
     }
 
     const [total, offers] = await Promise.all([
-      prisma.offer.count({ where }),
-      prisma.offer.findMany({
-        where,
-        orderBy: { created_at: "desc" },
-        skip: (page - 1) * limit,
-        take: limit,
-        select: {
-          id: true,
-          property_id: true,
-          buyer_id: true,
-          amount: true,
-          message: true,
-          expiry_date: true,
-          status: true,
-          created_at: true,
-          updated_at: true,
-          property: {
-            select: {
-              id: true,
-              title: true,
-              city: true,
-              state: true,
-              images: {
-                where: { is_primary: true },
-                select: { url: true },
-                take: 1,
-              },
-            },
-          },
-        },
-      }),
+      Offer.countDocuments(filter),
+      Offer.find(filter)
+        .sort({ created_at: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean<IOfferLean[]>(),
     ]);
 
-    return ok({
-      data: offers.map((o) => ({
+    const propIds = [...new Set(offers.map((o) => o.property_id))];
+    const properties = await Property.find({ _id: { $in: propIds } })
+      .select("title city state")
+      .lean<IPropertyLean[]>();
+    const propMap = new Map(properties.map((p) => [String(p._id), p]));
+
+    const primaryUrls = await PropertyImage.find({
+      property_id: { $in: propIds },
+      is_primary: true,
+    }).lean<IPropertyImageLean[]>();
+    const imgMap = new Map(primaryUrls.map((i) => [i.property_id, i.url]));
+
+    const data = offers.map((o) => {
+      const p = propMap.get(o.property_id);
+      return {
         ...o,
-        amount: toNumberOrNull(o.amount) ?? 0,
-        primary_image_url: o.property.images?.[0]?.url ?? null,
-      })),
+        id: String(o._id),
+        amount: toNumberOrNull(o.amount as unknown) ?? Number(o.amount) ?? 0,
+        primary_image_url: imgMap.get(o.property_id) ?? null,
+        property: p
+          ? {
+              id: o.property_id,
+              title: p.title,
+              city: p.city,
+              state: p.state,
+              images: [{ url: imgMap.get(o.property_id) }],
+            }
+          : null,
+      };
+    });
+
+    return ok({
+      data,
       pagination: pagination(total, page, limit),
     });
   } catch (err) {

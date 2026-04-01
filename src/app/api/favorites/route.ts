@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { Property, PropertyImage, Favorite, Review } from "@/lib/models";
 import { requireSession } from "@/lib/auth";
 import {
   ok,
@@ -10,9 +11,11 @@ import {
   notFound,
 } from "@/lib/response";
 import { toNumberOrNull } from "@/lib/serialization";
+import { parseBody } from "@/lib/validator";
+import { IPropertyLean, IPropertyImageLean, IFavoriteLean } from "@/types";
 
 const createSchema = z.object({
-  property_id: z.string().uuid(),
+  property_id: z.string().min(1),
 });
 
 type PropertyCardShape = {
@@ -34,47 +37,37 @@ async function buildPropertyCard(
   propertyId: string,
   ratingById: Map<string, number | null>,
 ) {
-  const property = await prisma.property.findUnique({
-    where: { id: propertyId, deleted_at: null },
-    select: {
-      id: true,
-      title: true,
-      description: true,
-      price: true,
-      city: true,
-      state: true,
-      property_type: true,
-      listing_type: true,
-      bedrooms: true,
-      bathrooms: true,
-      images: {
-        where: { is_primary: true },
-        select: { url: true },
-        take: 1,
-      },
-    },
-  });
+  const property = await Property.findOne({
+    _id: propertyId,
+    deleted_at: null,
+  }).lean<IPropertyLean | null>();
 
   if (!property) return null;
 
+  const primary = await PropertyImage.findOne({
+    property_id: propertyId,
+    is_primary: true,
+  }).lean<IPropertyImageLean | null>();
+
   return {
-    id: property.id,
+    id: String(property._id),
     title: property.title,
     description: property.description ?? null,
-    price: toNumberOrNull(property.price) ?? 0,
+    price: toNumberOrNull(property.price as unknown as object) ?? Number(property.price) ?? 0,
     city: property.city,
     state: property.state,
-    primary_image_url: property.images?.[0]?.url ?? null,
-    property_type: property.property_type as unknown as string,
-    listing_type: property.listing_type as unknown as string,
+    primary_image_url: primary?.url ?? null,
+    property_type: property.property_type as string,
+    listing_type: property.listing_type as string,
     bedrooms: property.bedrooms ?? null,
-    bathrooms: toNumberOrNull(property.bathrooms),
-    average_rating: ratingById.get(property.id) ?? null,
+    bathrooms: toNumberOrNull(property.bathrooms as unknown as object),
+    average_rating: ratingById.get(String(property._id)) ?? null,
   } satisfies PropertyCardShape;
 }
 
 export async function POST(req: Request) {
   try {
+    await connectDB();
     const session = await requireSession(req);
     const raw = await req.json().catch(() => null);
     const parsed = createSchema.safeParse(raw);
@@ -82,24 +75,30 @@ export async function POST(req: Request) {
       return badRequest("Validation failed", parsed.error.flatten());
     }
 
-    const property = await prisma.property.findUnique({
-      where: { id: parsed.data.property_id, deleted_at: null },
-      select: { id: true },
-    });
+    const property = await Property.findOne({
+      _id: parsed.data.property_id,
+      deleted_at: null,
+    })
+      .select("_id")
+      .lean<IPropertyLean | null>();
+
     if (!property) {
       return notFound("Property not found");
     }
 
     try {
-      const favorite = await prisma.favorite.create({
-        data: {
-          user_id: session.user.id,
-          property_id: parsed.data.property_id,
-        },
+      const favorite = await Favorite.create({
+        user_id: session.user.id,
+        property_id: parsed.data.property_id,
       });
-      return created(favorite);
-    } catch (err: any) {
-      if (err?.code === "P2002") {
+      return created(favorite.toJSON());
+    } catch (err: unknown) {
+      if (
+        typeof err === "object" &&
+        err !== null &&
+        "code" in err &&
+        (err as { code: number }).code === 11000
+      ) {
         return conflict("Property already favorited");
       }
       throw err;
@@ -112,28 +111,40 @@ export async function POST(req: Request) {
 
 export async function GET(req: Request) {
   try {
+    await connectDB();
     const session = await requireSession(req);
 
-    const favorites = await prisma.favorite.findMany({
-      where: { user_id: session.user.id },
-      select: { property_id: true, created_at: true },
-      orderBy: { created_at: "desc" },
-    });
+    const favorites = await Favorite.find({ user_id: session.user.id })
+      .sort({ created_at: -1 })
+      .select("property_id created_at")
+      .lean<IFavoriteLean[]>();
 
     const propertyIds = favorites.map((f) => f.property_id);
     if (!propertyIds.length) {
       return ok({ data: [] as PropertyCardShape[] });
     }
 
-    const groups = await prisma.review.groupBy({
-      by: ["target_id"],
-      where: { target_type: "property", target_id: { in: propertyIds } },
-      _avg: { rating: true },
-    });
+    const groups = await Review.aggregate([
+      {
+        $match: {
+          target_type: "property",
+          target_id: { $in: propertyIds },
+        },
+      },
+      {
+        $group: {
+          _id: "$target_id",
+          avgRating: { $avg: "$rating" },
+        },
+      },
+    ]);
 
     const ratingById = new Map<string, number | null>();
     for (const g of groups) {
-      ratingById.set(g.target_id, g._avg.rating ? Number(g._avg.rating) : null);
+      ratingById.set(
+        g._id as string,
+        g.avgRating != null ? Number(g.avgRating) : null,
+      );
     }
 
     const cards = [];

@@ -1,8 +1,10 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { User, Property, Review } from "@/lib/models";
 import { requireRole, requireSession } from "@/lib/auth";
 import { parseQuery } from "@/lib/validator";
 import { forbidden, ok, serverError } from "@/lib/response";
+import { IUserLean } from "@/types";
 
 const querySchema = z.object({
   page: z.coerce.number().int().min(1).optional(),
@@ -10,7 +12,7 @@ const querySchema = z.object({
 });
 
 const promoteSchema = z.object({
-  userId: z.string().uuid(),
+  userId: z.string().min(1),
 });
 
 function computePagination<T>(
@@ -32,6 +34,7 @@ function computePagination<T>(
 
 export async function GET(req: Request) {
   try {
+    await connectDB();
     await requireSession(req);
 
     const url = new URL(req.url);
@@ -41,54 +44,49 @@ export async function GET(req: Request) {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
 
+    const filter = { role: "agent" as const, deleted_at: null };
+
     const [total, agents] = await Promise.all([
-      prisma.user.count({
-        where: { role: "agent", deleted_at: null },
-      }),
-      prisma.user.findMany({
-        where: { role: "agent", deleted_at: null },
-        orderBy: { created_at: "desc" },
-        skip: (page - 1) * limit,
-        take: limit,
-        select: {
-          id: true,
-          email: true,
-          name: true,
-          phone: true,
-          avatar_url: true,
-          bio: true,
-          role: true,
-          theme: true,
-          is_demo: true,
-        },
-      }),
+      User.countDocuments(filter),
+      User.find(filter)
+        .sort({ created_at: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .select("email name phone avatar_url bio role theme is_demo created_at")
+        .lean<IUserLean[]>(),
     ]);
 
     const enriched = await Promise.all(
       agents.map(async (a) => {
-        const [activeListingsCount, avg] = await Promise.all([
-          prisma.property.count({
-            where: {
-              agent_id: a.id,
-              deleted_at: null,
-              status: "active",
-            },
+        const id = String(a._id);
+        const [activeListingsCount, avgAgg] = await Promise.all([
+          Property.countDocuments({
+            agent_id: id,
+            deleted_at: null,
+            status: "active",
           }),
-          prisma.review.aggregate({
-            where: {
-              target_type: "agent",
-              target_id: a.id,
+          Review.aggregate([
+            {
+              $match: { target_type: "agent", target_id: id },
             },
-            _avg: { rating: true },
-          }),
+            { $group: { _id: null, avg: { $avg: "$rating" } } },
+          ]),
         ]);
 
+        const avgRating = avgAgg[0]?.avg;
+
         return {
-          ...a,
+          id,
+          email: a.email,
+          name: a.name,
+          phone: a.phone,
+          avatar_url: a.avatar_url,
+          bio: a.bio,
+          role: a.role,
+          theme: a.theme,
+          is_demo: a.is_demo,
           active_listings_count: activeListingsCount,
-          average_review_rating: avg._avg.rating
-            ? Number(avg._avg.rating)
-            : null,
+          average_review_rating: avgRating != null ? Number(avgRating) : null,
         };
       }),
     );
@@ -102,6 +100,7 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
+    await connectDB();
     const session = await requireRole(req, ["admin"]);
     void session;
 
@@ -111,13 +110,21 @@ export async function POST(req: Request) {
       return forbidden("Invalid payload");
     }
 
-    const user = await prisma.user.update({
-      where: { id: parsed.data.userId },
-      data: { role: "agent" },
-      select: { id: true, email: true, role: true },
-    });
+    const user = await User.findOneAndUpdate(
+      { _id: parsed.data.userId },
+      { role: "agent" },
+      { new: true, select: "email role" },
+    ).lean<IUserLean | null>();
 
-    return ok(user);
+    if (!user) {
+      return serverError();
+    }
+
+    return ok({
+      id: String(user._id),
+      email: user.email,
+      role: user.role,
+    });
   } catch (err) {
     console.error("[agents] POST", err);
     return serverError();

@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import { Appointment } from "@/lib/models";
 import { requireSession } from "@/lib/auth";
 import {
   ok,
@@ -9,10 +10,11 @@ import {
   conflict,
   notFound,
 } from "@/lib/response";
+import { IAppointmentLean } from "@/types";
 import { parseBody } from "@/lib/validator";
 import { triggerNotification } from "@/lib/notify";
 
-const idSchema = z.string().uuid();
+const idSchema = z.string().min(1);
 
 const putSchema = z.object({
   scheduled_at: z.string().datetime().optional(),
@@ -25,14 +27,16 @@ export async function GET(
   context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const session = await requireSession(req);
     const { id } = await context.params;
     const parsedId = idSchema.safeParse(id);
     if (!parsedId.success) return badRequest("Invalid id");
 
-    const appointment = await prisma.appointment.findUnique({
-      where: { id: parsedId.data, deleted_at: null },
-    });
+    const appointment = await Appointment.findOne({
+      _id: parsedId.data,
+      deleted_at: null,
+    }).lean<IAppointmentLean | null>();
 
     if (!appointment) return notFound("Appointment not found");
 
@@ -43,7 +47,7 @@ export async function GET(
       if (!allowed) return forbidden("Forbidden");
     }
 
-    return ok(appointment);
+    return ok({ ...appointment, id: String(appointment._id) });
   } catch (err) {
     console.error("[appointments/[id]] GET", err);
     return serverError();
@@ -55,22 +59,18 @@ export async function PUT(
   context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const session = await requireSession(req);
     const { id } = await context.params;
     const parsedId = idSchema.safeParse(id);
     if (!parsedId.success) return badRequest("Invalid id");
 
-    const appointment = await prisma.appointment.findUnique({
-      where: { id: parsedId.data, deleted_at: null },
-      select: {
-        id: true,
-        property_id: true,
-        client_id: true,
-        agent_id: true,
-        scheduled_at: true,
-        status: true,
-      },
-    });
+    const appointment = await Appointment.findOne({
+      _id: parsedId.data,
+      deleted_at: null,
+    })
+      .select("property_id client_id agent_id scheduled_at status")
+      .lean<IAppointmentLean | null>();
 
     if (!appointment) return notFound("Appointment not found");
 
@@ -103,16 +103,17 @@ export async function PUT(
         return forbidden("Forbidden");
       }
 
-      const existingConfirmedAtTime = await prisma.appointment.findFirst({
-        where: {
-          agent_id: appointment.agent_id,
-          status: "confirmed",
-          scheduled_at: nextScheduledAt,
-          deleted_at: null,
-          NOT: { id: appointment.id },
-        },
-        select: { id: true },
-      });
+      const existingConfirmedAtTime = await Appointment.findOne({
+        property_id: appointment.property_id,
+        agent_id: appointment.agent_id,
+        status: "confirmed",
+        scheduled_at: body.scheduled_at
+          ? new Date(body.scheduled_at)
+          : new Date(appointment.scheduled_at),
+        _id: { $ne: appointment._id },
+      })
+        .select("_id")
+        .lean<IAppointmentLean | null>();
 
       if (existingConfirmedAtTime) {
         return conflict(
@@ -121,16 +122,19 @@ export async function PUT(
       }
     }
 
-    const updated = await prisma.appointment.update({
-      where: { id: appointment.id },
-      data: {
+    const updated = await Appointment.findByIdAndUpdate(
+      appointment._id,
+      {
         ...(body.scheduled_at !== undefined
-          ? { scheduled_at: nextScheduledAt }
+          ? { scheduled_at: new Date(body.scheduled_at) }
           : {}),
         ...(body.notes !== undefined ? { notes: body.notes } : {}),
         ...(body.status !== undefined ? { status: body.status } : {}),
       },
-    });
+      { new: true },
+    ).lean<IAppointmentLean | null>();
+
+    if (!updated) return serverError();
 
     if (body.status === "confirmed") {
       await triggerNotification({
@@ -138,11 +142,11 @@ export async function PUT(
         type: "appointment_confirmed",
         title: "Appointment confirmed",
         body: `Your appointment is confirmed for ${nextScheduledAt.toISOString()}`,
-        relatedId: updated.id,
+        relatedId: String(updated._id),
       });
     }
 
-    return ok(updated);
+    return ok({ ...updated, id: String(updated._id) });
   } catch (err) {
     console.error("[appointments/[id]] PUT", err);
     return serverError();
@@ -154,15 +158,18 @@ export async function DELETE(
   context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await connectDB();
     const session = await requireSession(req);
     const { id } = await context.params;
     const parsedId = idSchema.safeParse(id);
     if (!parsedId.success) return badRequest("Invalid id");
 
-    const appointment = await prisma.appointment.findUnique({
-      where: { id: parsedId.data, deleted_at: null },
-      select: { id: true, agent_id: true, client_id: true },
-    });
+    const appointment = await Appointment.findOne({
+      _id: parsedId.data,
+      deleted_at: null,
+    })
+      .select("client_id agent_id")
+      .lean<IAppointmentLean | null>();
 
     if (!appointment) return notFound("Appointment not found");
 
@@ -173,9 +180,8 @@ export async function DELETE(
       if (!allowed) return forbidden("Forbidden");
     }
 
-    await prisma.appointment.update({
-      where: { id: appointment.id },
-      data: { deleted_at: new Date() },
+    await Appointment.findByIdAndUpdate(appointment._id, {
+      deleted_at: new Date(),
     });
 
     return ok({ message: "Appointment cancelled" });
